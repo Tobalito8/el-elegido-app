@@ -729,28 +729,7 @@ function App(){
                             onValidateMission={validateMission}
                         />
 
-                        {/* Ghost chat */}
-                        {(!amIAlive||(amIAlive&&amIChosen))&&(
-                            <div className="bg-slate-900 border-2 border-slate-700 rounded-2xl flex flex-col h-[260px]">
-                                <div className="bg-slate-800 p-3 text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2 border-b border-slate-700">
-                                    <MsgIcon c="w-4 h-4"/>{amIChosen?"Mensajes del más allá (Solo tú los ves)":"Chat de Fantasmas"}
-                                </div>
-                                <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                                    {roomData.ghostMessages?.map((m,i)=>(
-                                        <div key={i} className="ghost-msg bg-slate-800/80 p-3 rounded-xl text-sm">
-                                            <span className="text-red-400 font-bold">{m.sender}: </span><span className="text-slate-200">{m.text}</span>
-                                        </div>
-                                    ))}
-                                    <div ref={chatEndRef}/>
-                                </div>
-                                {!amIAlive&&(
-                                    <div className="p-2 border-t border-slate-700 flex gap-2">
-                                        <input type="text" placeholder="Mensaje..." className="flex-1 bg-slate-800 px-4 py-2 rounded-xl text-sm outline-none text-white" value={ghostMessage} onChange={e=>setGhostMessage(e.target.value)} onKeyPress={e=>e.key==='Enter'&&sendGhostMessage()} style={{userSelect:'text',WebkitUserSelect:'text'}}/>
-                                        <button onClick={sendGhostMessage} className="bg-amber-700 px-4 py-2 rounded-xl"><SendIcon c="w-4 h-4 text-white"/></button>
-                                    </div>
-                                )}
-                            </div>
-                        )}
+
 
                         {isHost&&(
                             <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40">
@@ -802,16 +781,13 @@ function App(){
                             <h2 className="text-xl font-black leading-tight text-amber-100">{roomData.lastResult}</h2>
                         </div>
 
-                        {/* Mission result card */}
+                        {/* Mission result - only status, no details (to not reveal the chosen) */}
                         {roomData.mission?.text&&(roomData.mission.status==='success'||roomData.mission.status==='failure')&&(
-                            <div className={`p-4 rounded-2xl border-2 text-left space-y-2 fade-in ${roomData.mission.status==='success'?'border-emerald-600/50 bg-emerald-900/20':'border-red-700/50 bg-red-900/20'}`}>
+                            <div className={`p-3 rounded-2xl border flex items-center gap-3 fade-in ${roomData.mission.status==='success'?'border-emerald-700/40 bg-emerald-900/15':'border-red-700/40 bg-red-900/15'}`}>
+                                <span className="text-2xl">{roomData.mission.status==='success'?'✅':'❌'}</span>
                                 <p className={`font-black text-sm title-font ${roomData.mission.status==='success'?'text-emerald-300':'text-red-300'}`}>
-                                    📜 Misión {roomData.mission.status==='success'?'COMPLETADA ✅':'FALLIDA ❌'}
+                                    La misión fue {roomData.mission.status==='success'?'completada':'fallida'}
                                 </p>
-                                <p className="text-xs italic text-slate-400">"{roomData.mission.text}"</p>
-                                <div className={`text-xs font-bold mt-1 ${roomData.mission.status==='success'?'text-emerald-400':'text-red-400'}`}>
-                                    {roomData.mission.status==='success'?`🎁 Recompensa: ${roomData.mission.reward?.emoji} ${roomData.mission.reward?.label}`:`💀 Castigo: ${roomData.mission.penalty?.emoji} ${roomData.mission.penalty?.label}`}
-                                </div>
                             </div>
                         )}
 
