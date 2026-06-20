@@ -54,7 +54,6 @@
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
     import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-    // IMPORTANTE: Si usas otro proyecto/cuenta de Firebase, reemplaza TODO este firebaseConfig.
     const firebaseConfig = { apiKey:"AIzaSyAuqx6NzLsOfdYM0FlRDaXXCY77FB2gtUI",authDomain:"el-elegido-juego.firebaseapp.com",projectId:"el-elegido-juego",storageBucket:"el-elegido-juego.firebasestorage.app",messagingSenderId:"183753048942",appId:"1:183753048942:web:37b6660e2e84ed445b777f" };
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
@@ -66,10 +65,7 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
 const GS = {
-    INICIO:'inicio', LOBBY:'lobby', JUGANDO:'jugando',
-    MINIJUEGO_SETUP:'minijuego_setup', // juegos externos: el host asigna ganador
-    MINIJUEGO:'minijuego',             // juegos dentro de la app: ganador automático
-    VOTACION:'votacion',
+    INICIO:'inicio', LOBBY:'lobby', JUGANDO:'jugando', VOTACION:'votacion',
     RESULTADOS:'resultados',
     COFRE_NOTIFY:'cofre_notify',       // elegido ve su rol antes de cofres
     COFRE_SETUP:'cofre_setup',         // host elige orden manual o minijuego
@@ -77,20 +73,6 @@ const GS = {
     COFRE_TURNO:'cofre_turno',
     COFRE_FINAL:'cofre_final'
 };
-
-const GAME_MODE = { INSIDE:'inside', OUTSIDE:'outside' };
-const MINI_GAMES = [
-    { id:'reaction', name:'La Señal', type:GAME_MODE.INSIDE, icon:'⚡', description:'Toca cuando aparezca la señal. El más rápido gana inmunidad.' },
-    { id:'color_order', name:'Orden de Colores', type:GAME_MODE.INSIDE, icon:'🎨', description:'Memoriza y ordena la columna de colores igual al ejemplo.' },
-    { id:'memory_symbols', name:'Memoria Relámpago', type:GAME_MODE.INSIDE, icon:'🧠', description:'Memoriza símbolos y repite el orden correcto antes que los demás.' },
-    { id:'pulse', name:'Pulso Maldito', type:GAME_MODE.INSIDE, icon:'🔥', description:'Toca solo cuando la pantalla esté dorada. Si está roja pierdes puntos.' },
-    { id:'mini_blocks', name:'Mini Bloques', type:GAME_MODE.INSIDE, icon:'🧱', description:'Versión rápida tipo Tetris: toca las piezas marcadas para sumar puntos.' },
-    { id:'outside_custom', name:'Juego por fuera', type:GAME_MODE.OUTSIDE, icon:'🎲', description:'Se juega fuera de la app y el anfitrión asigna el ganador manualmente.' }
-];
-const getGameLabel = (game) => typeof game === 'string' ? game : (game?.name || 'Sin juego');
-const getGameType = (game) => typeof game === 'string' ? GAME_MODE.OUTSIDE : (game?.type || GAME_MODE.OUTSIDE);
-const makeGame = (game) => typeof game === 'string' ? { id:'outside_custom', name:game, type:GAME_MODE.OUTSIDE, icon:'🎲' } : game;
-const shuffleArray = (arr) => [...arr].sort(()=>Math.random() - 0.5);
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 const LockIcon=({c})=>(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={c}><rect x="5" y="10" width="14" height="10" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1"/></svg>);
@@ -160,6 +142,12 @@ function App() {
     const [selectingSwapTarget, setSelectingSwapTarget] = useState(false);
     const chatEndRef = useRef(null);
 
+    const [reconnecting, setReconnecting] = useState(false);
+    // How many consecutive snapshots in a row found us missing from the player list
+    // before we actually treat it as "removed". Avoids false-positives from stale/cached
+    // snapshots firing right when the room doc is created or right after we join.
+    const missingStreakRef = useRef(0);
+
     useEffect(() => {
         const handleReady = () => setIsFirebaseReady(true);
         if (window.db) setIsFirebaseReady(true);
@@ -169,27 +157,70 @@ function App() {
         setMyId(id);
         const saved = localStorage.getItem('playerName');
         if (saved) setPlayerName(saved);
-        // Auto-fill code from URL
+        // Auto-fill code from URL (invite link)
         const params = new URLSearchParams(window.location.search);
         const sala = params.get('sala');
-        if (sala) setRoomCodeInput(sala.toUpperCase());
+        const savedRoom = localStorage.getItem('roomCode');
+        if (sala) {
+            setRoomCodeInput(sala.toUpperCase());
+        } else if (savedRoom) {
+            // We were inside a room before (refresh / app went to background / tab killed).
+            // Try to silently rejoin instead of dumping the player back at the start screen.
+            setRoomCodeInput(savedRoom);
+            setReconnecting(true);
+        }
         return () => window.removeEventListener('firebaseReady', handleReady);
     }, []);
 
+    // Auto-reconnect: once Firebase + name + saved room code are ready, rejoin automatically.
+    useEffect(() => {
+        if (!reconnecting || !isFirebaseReady || !playerName || !roomCodeInput) return;
+        (async () => {
+            const code = roomCodeInput.trim().toUpperCase();
+            try {
+                const snap = await window.firebaseGetDoc(ref(code));
+                if (snap.exists()) {
+                    const data = snap.data();
+                    let ps = [...data.players];
+                    if (!ps.find(p=>p.id===myId)) { ps.push({id:myId,name:playerName,isAlive:true}); await upd({players:ps},code); }
+                    setRoomCode(code); setError('');
+                } else {
+                    localStorage.removeItem('roomCode');
+                }
+            } catch(e) { /* ignore, user can join manually */ }
+            setReconnecting(false);
+        })();
+    }, [reconnecting, isFirebaseReady, playerName, roomCodeInput, myId]);
+
+    useEffect(() => {
+        if (roomCode) localStorage.setItem('roomCode', roomCode);
+        else localStorage.removeItem('roomCode');
+    }, [roomCode]);
+
     useEffect(() => {
         if (!isFirebaseReady || !roomCode || !window.db) return;
+        missingStreakRef.current = 0;
         const roomRef = window.firebaseDoc(window.db, 'rooms', roomCode);
         const unsub = window.firebaseOnSnapshot(roomRef, snap => {
             if (snap.exists()) {
                 const data = snap.data();
                 setRoomData(data);
                 setGameState(data.status);
-                if (data.status !== GS.LOBBY && !data.players.find(p => p.id === myId)) {
-                    setError('Fuiste desconectado de la sala.');
-                    setRoomCode(''); setRoomData(null); setGameState(GS.INICIO);
+                if (!data.players.find(p => p.id === myId)) {
+                    // Require two consecutive misses (debounced) before kicking the player out,
+                    // to survive transient/cached snapshots right after joining.
+                    missingStreakRef.current += 1;
+                    if (missingStreakRef.current >= 2) {
+                        setError('Fuiste desconectado de la sala.');
+                        localStorage.removeItem('roomCode');
+                        setRoomCode(''); setRoomData(null); setGameState(GS.INICIO);
+                    }
+                } else {
+                    missingStreakRef.current = 0;
                 }
             } else {
                 setError('La sala fue cerrada por el anfitrión.');
+                localStorage.removeItem('roomCode');
                 setRoomCode(''); setRoomData(null); setGameState(GS.INICIO);
             }
         });
@@ -209,13 +240,13 @@ function App() {
             code, hostId:myId, status:GS.LOBBY,
             players:[{id:myId, name:playerName, isAlive:true}],
             chosenHash:null, votes:{}, lastResult:'', lastVictim:null, victimWasChosen:false,
-            ghostMessages:[], games:[], currentGame:null, roundWinner:null, immunePlayerId:null, miniGame:null,
+            ghostMessages:[], games:[], currentGame:null, roundWinner:null, immunePlayerId:null,
             chestOwners:null, chestMoneyIndex:null, chestTurnOrder:null,
             chestCurrentTurnIndex:null, chestWinnerId:null,
             cofreElegidoReady:false, cofreMinijuego:null
         };
         try { await window.firebaseSetDoc(ref(code), data); setRoomCode(code); setError(''); }
-        catch(e) { console.error("Error al crear sala:", e); setError(`Error al crear sala: ${e.code || ""} ${e.message || e}`); }
+        catch(e) { setError("Error al crear sala."); }
     };
 
     const joinRoom = async () => {
@@ -231,7 +262,7 @@ function App() {
                 if (!ps.find(p=>p.id===myId)) { ps.push({id:myId,name:playerName,isAlive:true}); await upd({players:ps},code); }
                 setRoomCode(code); setError('');
             } else { setError('Ese código de sala no existe.'); }
-        } catch(e) { console.error("Error al conectarse:", e); setError(`Error al conectarse: ${e.code || ""} ${e.message || e}`); }
+        } catch(e) { setError("Error al conectarse."); }
     };
 
     const exitRoom = async () => {
@@ -245,72 +276,21 @@ function App() {
 
     const addGame = async () => {
         if (!newGameName.trim()) return;
-        const customGame = { id:`outside_${Date.now()}`, name:newGameName.trim(), type:GAME_MODE.OUTSIDE, icon:'🎲' };
-        await upd({games:[...(roomData.games||[]).map(makeGame), customGame]});
+        await upd({games:[...(roomData.games||[]), newGameName.trim()]});
         setNewGameName('');
     };
-    const addPrebuiltGame = async (game) => {
-        const games = (roomData.games||[]).map(makeGame);
-        if (games.some(g=>g.id===game.id)) return;
-        await upd({games:[...games, game]});
-    };
     const removeGame = async (i) => await upd({games:(roomData.games||[]).filter((_,idx)=>idx!==i)});
-
-    const pickRandomGame = () => {
-        const games = (roomData.games||[]).map(makeGame);
-        return games.length ? games[Math.floor(Math.random()*games.length)] : null;
-    };
 
     const startGame = async () => {
         const alive = roomData.players.filter(p=>p.isAlive);
         if (alive.length < 2) return;
         const chosenId = alive[Math.floor(Math.random()*alive.length)].id;
         const chosenHash = btoa(chosenId+roomCode);
-        const game = pickRandomGame();
-        await upd({status:GS.JUGANDO, chosenHash, votes:{}, ghostMessages:[], currentGame:game, roundWinner:null, immunePlayerId:null, miniGame:null});
+        const game = roomData.games?.length ? roomData.games[Math.floor(Math.random()*roomData.games.length)] : null;
+        await upd({status:GS.JUGANDO, chosenHash, votes:{}, ghostMessages:[], currentGame:game, roundWinner:null, immunePlayerId:null});
     };
 
-    const buildMiniGameState = (game) => {
-        const g = makeGame(game);
-        if (g.id === 'color_order') {
-            const colors = ['red','blue','green','yellow','purple'];
-            return { id:g.id, phase:'ready', startedAt:null, pattern:shuffleArray(colors), submissions:{} };
-        }
-        if (g.id === 'memory_symbols') {
-            const symbols = ['👻','👑','🔥','💎','🐍'];
-            return { id:g.id, phase:'ready', startedAt:null, pattern:shuffleArray(symbols), submissions:{} };
-        }
-        if (g.id === 'pulse') return { id:g.id, phase:'ready', startedAt:null, durationMs:10000, scores:{} };
-        if (g.id === 'mini_blocks') return { id:g.id, phase:'ready', startedAt:null, durationMs:20000, scores:{} };
-        return { id:'reaction', phase:'ready', startedAt:null, goTime:null, taps:{} };
-    };
-
-    const startMiniGameOrVoting = async () => {
-        if (!roomData.currentGame) {
-            await upd({status:GS.VOTACION, votes:{}});
-            return;
-        }
-        const game = makeGame(roomData.currentGame);
-        if (getGameType(game) === GAME_MODE.INSIDE) {
-            await upd({status:GS.MINIJUEGO, miniGame:buildMiniGameState(game), roundWinner:null, immunePlayerId:null, votes:{}});
-        } else {
-            await upd({status:GS.MINIJUEGO_SETUP, roundWinner:null, immunePlayerId:null, votes:{}});
-        }
-    };
-
-    const finishManualMiniGame = async (winnerId) => {
-        await upd({roundWinner:winnerId, immunePlayerId:winnerId, status:GS.VOTACION, votes:{}});
-    };
-
-    const updateMiniGame = async (patch) => {
-        const data = {};
-        Object.entries(patch).forEach(([key,value]) => data[`miniGame.${key}`] = value);
-        await upd(data);
-    };
-
-    const finishInsideMiniGame = async (winnerId) => {
-        await upd({roundWinner:winnerId, immunePlayerId:winnerId, status:GS.VOTACION, votes:{}});
-    };
+    const startVoting = async () => await upd({status:GS.VOTACION});
 
     const castVote = async (targetId) => {
         if (roomData.votes?.[myId] === targetId) return;
@@ -370,16 +350,15 @@ function App() {
                 chestOwners, chestMoneyIndex:moneyIdx,
                 chestTurnOrder:null, chestCurrentTurnIndex:0,
                 chestWinnerId:null, cofreElegidoReady:false,
-                votes:{}, immunePlayerId:null, miniGame:null, cofreMinijuego:null
+                votes:{}, immunePlayerId:null, cofreMinijuego:null
             });
             return;
         }
         if (survivors.length <= 1) {
-            await upd({status:GS.LOBBY, players:roomData.players.map(p=>({...p,isAlive:true})), miniGame:null, currentGame:null, roundWinner:null, immunePlayerId:null});
+            await upd({status:GS.LOBBY, players:roomData.players.map(p=>({...p,isAlive:true}))});
         } else {
-            const games = (roomData.games||[]).map(makeGame);
-            const game = games.length ? games[Math.floor(Math.random()*games.length)] : null;
-            await upd({status:GS.JUGANDO, currentGame:game, votes:{}, ghostMessages:[], immunePlayerId:null, roundWinner:null, miniGame:null, lastVictim:null});
+            const game = roomData.games?.length ? roomData.games[Math.floor(Math.random()*roomData.games.length)] : null;
+            await upd({status:GS.JUGANDO, currentGame:game, votes:{}, ghostMessages:[], immunePlayerId:null, lastVictim:null});
         }
     };
 
@@ -392,10 +371,13 @@ function App() {
         await upd({chestTurnOrder:order, chestCurrentTurnIndex:0, status:GS.COFRE_TURNO});
     };
 
+    const MINIGAME_TYPES = ['reaccion','secuencia','memoria'];
+
     const startMinijuego = async () => {
+        const type = MINIGAME_TYPES[Math.floor(Math.random()*MINIGAME_TYPES.length)];
         await upd({
             status:GS.COFRE_MINIJUEGO,
-            cofreMinijuego:{phase:'countdown', startedAt:Date.now(), goTime:null, taps:{}}
+            cofreMinijuego:{type, phase:'countdown', startedAt:Date.now(), goTime:null, taps:{}}
         });
     };
 
@@ -403,11 +385,23 @@ function App() {
         await upd({'cofreMinijuego.phase':'go','cofreMinijuego.goTime':Date.now()});
     };
 
-    const recordTap = async () => {
+    // rt: lower = better/faster. Each minigame variant computes its own rt and passes it in.
+    const recordTap = async (rt) => {
         const goTime = roomData.cofreMinijuego?.goTime;
         if (!goTime) return;
-        const rt = Date.now() - goTime;
-        await upd({[`cofreMinijuego.taps.${myId}`]:rt});
+        const finalRt = (rt === undefined || rt === null) ? (Date.now() - goTime) : rt;
+        await upd({[`cofreMinijuego.taps.${myId}`]:finalRt});
+    };
+
+    // Penalty time given to anyone who never finishes, so the game never gets stuck waiting forever.
+    const PENALTY_RT = 999999;
+
+    const autoCompleteMissing = async () => {
+        const alive = roomData.players.filter(p=>p.isAlive);
+        const taps = {...(roomData.cofreMinijuego?.taps || {})};
+        let changed = false;
+        alive.forEach(p => { if (taps[p.id] === undefined) { taps[p.id] = PENALTY_RT; changed = true; } });
+        if (changed) await upd({'cofreMinijuego.taps':taps});
     };
 
     const finishMinijuego = async () => {
@@ -415,7 +409,7 @@ function App() {
         const alive = roomData.players.filter(p=>p.isAlive);
         // Sort by reaction time ascending (fastest = lowest RT = winner → last to pick)
         const sorted = alive
-            .map(p=>({id:p.id, rt: taps[p.id] ?? 99999}))
+            .map(p=>({id:p.id, rt: taps[p.id] ?? PENALTY_RT}))
             .sort((a,b)=>a.rt - b.rt);
         // loser (slowest) first, winner (fastest) last
         const order = sorted.map(p=>p.id).reverse();
@@ -449,7 +443,7 @@ function App() {
     const backToLobby = async () => {
         await upd({status:GS.LOBBY, players:roomData.players.map(p=>({...p,isAlive:true})),
             chestOwners:null,chestMoneyIndex:null,chestTurnOrder:null,chestCurrentTurnIndex:null,
-            chestWinnerId:null,cofreElegidoReady:false,cofreMinijuego:null,miniGame:null,currentGame:null,roundWinner:null,immunePlayerId:null});
+            chestWinnerId:null,cofreElegidoReady:false,cofreMinijuego:null});
     };
 
     // ── Derived ───────────────────────────────────────────────────────────────
@@ -539,21 +533,10 @@ function App() {
                                     <input type="text" placeholder="Ej. Verdad o Reto" className="flex-1 bg-slate-900 p-3 rounded-xl border border-slate-700 text-sm outline-none focus:border-amber-500 text-white" value={newGameName} onChange={e=>setNewGameName(e.target.value)} onKeyPress={e=>e.key==='Enter'&&addGame()}/>
                                     <button onClick={addGame} className="bg-amber-700 hover:bg-amber-600 px-4 py-2 rounded-xl font-bold active:scale-95 text-sm transition-colors">Añadir</button>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2">
-                                    {MINI_GAMES.filter(g=>g.id!=='outside_custom').map(game=>(
-                                        <button key={game.id} onClick={()=>addPrebuiltGame(game)}
-                                            className="bg-slate-900/70 hover:bg-slate-800 border border-slate-700 rounded-xl p-3 text-left active:scale-95 transition-all">
-                                            <div className="text-lg">{game.icon}</div>
-                                            <p className="text-xs font-black text-amber-200">{game.name}</p>
-                                            <p className="text-[10px] text-slate-500 leading-tight">Dentro de la app</p>
-                                        </button>
-                                    ))}
-                                </div>
                                 <div className="flex flex-wrap gap-2">
-                                    {(roomData.games||[]).map(makeGame).map((game,i)=>(
-                                        <div key={i} className={`px-3 py-1 rounded-full text-xs font-bold flex items-center gap-2 ${game.type===GAME_MODE.INSIDE?'bg-amber-800/50 text-amber-200':'bg-slate-700 text-slate-200'}`}>
-                                            <span>{game.icon || '🎲'}</span> {game.name}
-                                            <span className="text-[9px] opacity-60">{game.type===GAME_MODE.INSIDE?'APP':'FUERA'}</span>
+                                    {(roomData.games||[]).map((game,i)=>(
+                                        <div key={i} className="bg-slate-700 px-3 py-1 rounded-full text-xs font-bold flex items-center gap-2 text-amber-200">
+                                            {game}
                                             <button onClick={()=>removeGame(i)} className="text-red-400 hover:text-red-300"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
                                         </div>
                                     ))}
@@ -571,8 +554,8 @@ function App() {
                 {/* ── JUGANDO ────────────────────────────────────────── */}
                 {gameState===GS.JUGANDO && roomData && (
                     <>
-                        {roomData.currentGame&&<p className="text-center text-sm text-slate-400 mb-4">Mini ronda: <span className="font-bold text-amber-200">{getGameLabel(roomData.currentGame)}</span></p>}
-                        {false && isHost && roomData.currentGame && (
+                        {roomData.currentGame&&<p className="text-center text-sm text-slate-400 mb-4">Juego: <span className="font-bold text-amber-200">{roomData.currentGame}</span></p>}
+                        {isHost && roomData.currentGame && (
                             <div className="mb-4 space-y-2">
                                 <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Ganador del juego</p>
                                 {alive.map(p=>(
@@ -624,30 +607,11 @@ function App() {
                             )}
                             {isHost&&(
                                 <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40">
-                                    <button onClick={startMiniGameOrVoting} className="w-full bg-slate-200 text-slate-900 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font">{roomData.currentGame?'INICIAR MINI RONDA':'INICIAR VOTACIÓN'}</button>
+                                    <button onClick={startVoting} className="w-full bg-slate-200 text-slate-900 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font">INICIAR VOTACIÓN</button>
                                 </div>
                             )}
                         </div>
                     </>
-                )}
-
-                {/* ── MINIJUEGO_SETUP ───────────────────────────────── */}
-                {gameState===GS.MINIJUEGO_SETUP && roomData && (
-                    <OutsideGameWinnerPicker
-                        myId={myId} isHost={isHost} roomData={roomData}
-                        alive={alive} getName={getName}
-                        finishManualMiniGame={finishManualMiniGame}
-                    />
-                )}
-
-                {/* ── MINIJUEGO ─────────────────────────────────────── */}
-                {gameState===GS.MINIJUEGO && roomData && (
-                    <MiniGameRouter
-                        myId={myId} isHost={isHost} roomData={roomData}
-                        alive={alive} getName={getName}
-                        updateMiniGame={updateMiniGame}
-                        finishInsideMiniGame={finishInsideMiniGame}
-                    />
                 )}
 
                 {/* ── VOTACION ───────────────────────────────────────── */}
@@ -657,12 +621,6 @@ function App() {
                             <h2 className="text-3xl font-black title-font text-amber-100">ELIMINACIÓN</h2>
                             <p className="text-slate-400 text-sm italic mt-1">¿A quién vas a expulsar?</p>
                         </div>
-                        {roomData.immunePlayerId && (
-                            <div className="bg-amber-900/20 border border-amber-700/40 p-4 rounded-2xl text-center mb-4">
-                                <p className="text-amber-300 font-black">🛡 {getName(roomData.immunePlayerId)} tiene inmunidad</p>
-                                <p className="text-slate-400 text-sm italic mt-1">No puede ser eliminado en esta votación.</p>
-                            </div>
-                        )}
                         <div className="grid gap-3 pb-20">
                             {roomData.players.filter(p=>p.isAlive&&p.id!==roomData.immunePlayerId).map(p=>(
                                 <button key={p.id} onClick={()=>castVote(p.id)} disabled={!amIAlive}
@@ -737,6 +695,7 @@ function App() {
                         alive={alive} getName={getName}
                         triggerGo={triggerGo} recordTap={recordTap}
                         finishMinijuego={finishMinijuego}
+                        autoCompleteMissing={autoCompleteMissing}
                     />
                 )}
 
@@ -761,300 +720,6 @@ function App() {
                     />
                 )}
             </div>
-        </div>
-    );
-}
-
-
-// ════════════════════════════════════════════════════════════════════════
-// MINI RONDAS – Juegos externos e internos con inmunidad automática
-// ════════════════════════════════════════════════════════════════════════
-function OutsideGameWinnerPicker({ isHost, roomData, alive, getName, finishManualMiniGame }) {
-    if (!isHost) {
-        return (
-            <div className="fade-in text-center space-y-6 pt-10">
-                <div className="text-5xl">🎲</div>
-                <h2 className="text-3xl font-black text-amber-300 title-font">MINI RONDA</h2>
-                <p className="text-slate-400 italic">Juego: <span className="text-amber-200 font-bold">{getGameLabel(roomData.currentGame)}</span></p>
-                <p className="text-slate-500 animate-pulse font-bold">Esperando a que el anfitrión asigne el ganador...</p>
-            </div>
-        );
-    }
-    return (
-        <div className="fade-in space-y-6 pt-6">
-            <div className="text-center">
-                <div className="text-5xl mb-2">🎲</div>
-                <h2 className="text-3xl font-black text-amber-300 title-font">JUEGO POR FUERA</h2>
-                <p className="text-slate-400 italic text-sm mt-1">{getGameLabel(roomData.currentGame)}</p>
-            </div>
-            <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-2xl text-center">
-                <p className="text-slate-300 text-sm italic">Cuando terminen el juego fuera de la app, selecciona al ganador. La inmunidad se asignará automáticamente.</p>
-            </div>
-            <div className="grid gap-3 pb-20">
-                {alive.map(p=>(
-                    <button key={p.id} onClick={()=>finishManualMiniGame(p.id)}
-                        className="p-5 rounded-2xl border-2 border-slate-700 bg-slate-800/50 hover:border-amber-500 hover:bg-amber-900/20 active:scale-95 transition-all flex justify-between items-center">
-                        <span className="font-bold text-lg text-amber-100">{p.name}</span>
-                        <AwardIcon c="w-5 h-5 text-amber-400"/>
-                    </button>
-                ))}
-            </div>
-        </div>
-    );
-}
-
-function MiniGameRouter(props) {
-    const id = props.roomData.miniGame?.id || makeGame(props.roomData.currentGame)?.id;
-    if (id === 'color_order') return <ColorOrderMiniGame {...props}/>;
-    if (id === 'memory_symbols') return <MemorySymbolsMiniGame {...props}/>;
-    if (id === 'pulse') return <PulseMiniGame {...props}/>;
-    if (id === 'mini_blocks') return <MiniBlocksGame {...props}/>;
-    return <ReactionMiniGame {...props}/>;
-}
-
-function ReactionMiniGame({ myId, isHost, roomData, alive, getName, updateMiniGame, finishInsideMiniGame }) {
-    const [localCount, setLocalCount] = useState(3);
-    const [hasTapped, setHasTapped] = useState(false);
-    const [myReaction, setMyReaction] = useState(null);
-    const [finished, setFinished] = useState(false);
-    const mj = roomData.miniGame || {};
-    const taps = mj.taps || {};
-
-    useEffect(()=>{ setHasTapped(false); setMyReaction(null); setFinished(false); }, [mj.startedAt]);
-
-    useEffect(() => {
-        if (mj.phase !== 'countdown' || !isHost) return;
-        let count = 3;
-        setLocalCount(3);
-        const iv = setInterval(() => {
-            count--;
-            setLocalCount(count);
-            if (count <= 0) {
-                clearInterval(iv);
-                const delay = 900 + Math.random() * 2200;
-                setTimeout(() => updateMiniGame({phase:'go', goTime:Date.now()}), delay);
-            }
-        }, 1000);
-        return () => clearInterval(iv);
-    }, [mj.phase, mj.startedAt, isHost]);
-
-    const handleTap = async () => {
-        if (mj.phase !== 'go' || hasTapped || taps[myId]) return;
-        const rt = Date.now() - mj.goTime;
-        setHasTapped(true);
-        setMyReaction(rt);
-        await updateMiniGame({[`taps.${myId}`]:rt});
-    };
-
-    const allTapped = alive.every(p=>taps[p.id]);
-    const results = alive.map(p=>({id:p.id, rt:taps[p.id]??null})).sort((a,b)=>(a.rt??99999)-(b.rt??99999));
-    const winnerId = results[0]?.id;
-
-    useEffect(()=>{
-        if (!isHost || !allTapped || !winnerId || finished) return;
-        setFinished(true);
-        setTimeout(()=>finishInsideMiniGame(winnerId), 1800);
-    }, [isHost, allTapped, winnerId, finished]);
-
-    return (
-        <div className="fade-in flex flex-col items-center gap-6 pt-6 text-center">
-            <h2 className="text-3xl font-black text-amber-300 title-font">⚡ LA SEÑAL</h2>
-            {mj.phase === 'ready' && (
-                <div className="space-y-5 w-full">
-                    <p className="text-slate-400 italic text-sm">Toca apenas aparezca la señal. El más rápido gana inmunidad.</p>
-                    {isHost ? <button onClick={()=>updateMiniGame({phase:'countdown', startedAt:Date.now(), taps:{}})} className="w-full bg-amber-600 hover:bg-amber-500 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font">INICIAR</button> : <p className="text-slate-500 animate-pulse font-bold">Esperando al anfitrión...</p>}
-                </div>
-            )}
-            {mj.phase === 'countdown' && (
-                <div className="space-y-6">
-                    <p className="text-slate-400 italic text-sm">Prepárate...</p>
-                    <div className="w-40 h-40 mx-auto rounded-full border-4 border-amber-700 bg-amber-900/20 flex items-center justify-center"><span className="text-7xl font-black text-amber-300 title-font countdown-num">{localCount > 0 ? localCount : '...'}</span></div>
-                </div>
-            )}
-            {mj.phase === 'go' && !allTapped && (
-                <button onClick={handleTap} disabled={hasTapped} className={`tap-btn w-full min-h-[260px] rounded-[2rem] border-4 flex flex-col items-center justify-center ${hasTapped?'bg-slate-800 border-slate-600':'bg-amber-400 border-amber-200'}`}>
-                    <div className="text-6xl mb-2">⚡</div>
-                    <p className={`text-5xl font-black title-font ${hasTapped?'text-slate-300':'text-amber-950'}`}>{hasTapped?'LISTO':'¡YA!'}</p>
-                    {myReaction&&<p className="text-slate-400 font-bold mt-2">{myReaction} ms</p>}
-                </button>
-            )}
-            {allTapped && (
-                <div className="w-full space-y-3">
-                    <p className="text-amber-300 font-black title-font">Ganador: {getName(winnerId)}</p>
-                    {results.map((r,i)=>(<div key={r.id} className="result-row bg-slate-800/60 border border-slate-700 p-3 rounded-xl flex justify-between"><span>{i+1}. {getName(r.id)}</span><span className="text-amber-300 font-bold">{r.rt} ms</span></div>))}
-                    <p className="text-slate-500 text-sm animate-pulse">Asignando inmunidad...</p>
-                </div>
-            )}
-        </div>
-    );
-}
-
-function SequenceMiniGame({ title, icon, itemsLabel, myId, isHost, roomData, alive, getName, updateMiniGame, finishInsideMiniGame }) {
-    const mj = roomData.miniGame || {};
-    const pattern = mj.pattern || [];
-    const [answer, setAnswer] = useState([]);
-    const [finished, setFinished] = useState(false);
-    const submissions = mj.submissions || {};
-
-    useEffect(()=>{ setAnswer([]); setFinished(false); }, [mj.startedAt]);
-
-    useEffect(()=>{
-        if (!isHost || mj.phase !== 'memorize') return;
-        const t = setTimeout(()=>updateMiniGame({phase:'play'}), 3500);
-        return () => clearTimeout(t);
-    }, [isHost, mj.phase, mj.startedAt]);
-
-    const submit = async (nextAnswer) => {
-        const correct = JSON.stringify(nextAnswer) === JSON.stringify(pattern);
-        await updateMiniGame({[`submissions.${myId}`]:{answer:nextAnswer, correct, finishedAt:Date.now()}});
-    };
-
-    const pick = (item) => {
-        if (mj.phase !== 'play' || submissions[myId]) return;
-        const next = [...answer, item];
-        setAnswer(next);
-        if (next.length === pattern.length) submit(next);
-    };
-
-    const correctSubs = Object.entries(submissions).filter(([_,v])=>v.correct).sort((a,b)=>a[1].finishedAt-b[1].finishedAt);
-    const winnerId = correctSubs[0]?.[0];
-
-    useEffect(()=>{
-        if (!isHost || !winnerId || finished) return;
-        setFinished(true);
-        setTimeout(()=>finishInsideMiniGame(winnerId), 1600);
-    }, [isHost, winnerId, finished]);
-
-    const options = [...pattern].sort();
-    return (
-        <div className="fade-in space-y-6 pt-6 text-center">
-            <div className="text-5xl">{icon}</div>
-            <h2 className="text-3xl font-black text-amber-300 title-font">{title}</h2>
-            {mj.phase === 'ready' && (
-                <div className="space-y-4">
-                    <p className="text-slate-400 italic text-sm">Memoriza el ejemplo y repítelo en orden. El correcto más rápido gana inmunidad.</p>
-                    {isHost ? <button onClick={()=>updateMiniGame({phase:'memorize', startedAt:Date.now(), submissions:{}})} className="w-full bg-amber-600 hover:bg-amber-500 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font">MOSTRAR EJEMPLO</button> : <p className="text-slate-500 animate-pulse font-bold">Esperando al anfitrión...</p>}
-                </div>
-            )}
-            {mj.phase === 'memorize' && (
-                <div className="space-y-3">
-                    <p className="text-slate-400 italic text-sm">Memoriza este orden...</p>
-                    <div className="bg-slate-800/70 border border-slate-700 p-4 rounded-2xl grid gap-2">{pattern.map((item,i)=><div key={i} className="p-3 rounded-xl bg-slate-900 text-3xl font-black">{item}</div>)}</div>
-                </div>
-            )}
-            {mj.phase === 'play' && !winnerId && (
-                <div className="space-y-4">
-                    <p className="text-slate-400 italic text-sm">Ordena {itemsLabel} como aparecieron.</p>
-                    <div className="min-h-[64px] bg-slate-900/70 border border-slate-700 rounded-2xl p-3 flex gap-2 flex-wrap justify-center">{answer.map((item,i)=><span key={i} className="text-3xl bg-slate-800 rounded-xl px-3 py-2">{item}</span>)}</div>
-                    {submissions[myId] ? <div className={`p-4 rounded-2xl border ${submissions[myId].correct?'border-emerald-600 bg-emerald-900/20 text-emerald-300':'border-red-600 bg-red-900/20 text-red-300'}`}>{submissions[myId].correct?'¡Correcto!':'Incorrecto'}</div> : <div className="grid grid-cols-2 gap-3">{options.map((item,i)=><button key={i} onClick={()=>pick(item)} className="p-4 rounded-2xl border-2 border-slate-700 bg-slate-800/50 text-3xl active:scale-95">{item}</button>)}</div>}
-                    <button onClick={()=>setAnswer([])} disabled={!!submissions[myId]} className="text-slate-500 text-sm hover:text-slate-300">Borrar respuesta</button>
-                </div>
-            )}
-            {winnerId && <div className="bg-amber-900/30 border border-amber-500 p-5 rounded-2xl"><p className="text-amber-300 font-black title-font">Ganador: {getName(winnerId)}</p><p className="text-slate-400 text-sm animate-pulse">Asignando inmunidad...</p></div>}
-        </div>
-    );
-}
-
-function ColorOrderMiniGame(props) {
-    const colorMap = { red:'🔴', blue:'🔵', green:'🟢', yellow:'🟡', purple:'🟣' };
-    const mappedProps = {...props, roomData:{...props.roomData, miniGame:{...props.roomData.miniGame, pattern:(props.roomData.miniGame?.pattern||[]).map(c=>colorMap[c]||c)}}};
-    return <SequenceMiniGame {...mappedProps} title="ORDEN DE COLORES" icon="🎨" itemsLabel="los colores"/>;
-}
-
-function MemorySymbolsMiniGame(props) {
-    return <SequenceMiniGame {...props} title="MEMORIA RELÁMPAGO" icon="🧠" itemsLabel="los símbolos"/>;
-}
-
-function PulseMiniGame({ myId, isHost, roomData, alive, getName, updateMiniGame, finishInsideMiniGame }) {
-    const mj = roomData.miniGame || {};
-    const scores = mj.scores || {};
-    const [tick, setTick] = useState(Date.now());
-    const [finished, setFinished] = useState(false);
-    const isGold = Math.floor((tick - (mj.startedAt || tick)) / 700) % 3 !== 1;
-    const elapsed = mj.startedAt ? Date.now() - mj.startedAt : 0;
-    const remaining = Math.max(0, Math.ceil(((mj.durationMs || 10000) - elapsed) / 1000));
-
-    useEffect(()=>{
-        if (mj.phase !== 'playing') return;
-        const iv = setInterval(()=>setTick(Date.now()), 250);
-        return () => clearInterval(iv);
-    }, [mj.phase]);
-
-    useEffect(()=>{
-        if (!isHost || mj.phase !== 'playing' || finished) return;
-        const t = setTimeout(()=>{
-            const ranked = alive.map(p=>({id:p.id, score:scores[p.id]||0})).sort((a,b)=>b.score-a.score);
-            setFinished(true);
-            finishInsideMiniGame(ranked[0]?.id || alive[0]?.id);
-        }, Math.max(500, (mj.durationMs || 10000) - elapsed));
-        return () => clearTimeout(t);
-    }, [isHost, mj.phase, scores, finished]);
-
-    const tap = async () => {
-        if (mj.phase !== 'playing') return;
-        const current = scores[myId] || 0;
-        await updateMiniGame({[`scores.${myId}`]: current + (isGold ? 1 : -2)});
-    };
-
-    return (
-        <div className="fade-in space-y-6 pt-6 text-center">
-            <div className="text-5xl">🔥</div>
-            <h2 className="text-3xl font-black text-amber-300 title-font">PULSO MALDITO</h2>
-            {mj.phase === 'ready' && <>{isHost ? <button onClick={()=>updateMiniGame({phase:'playing', startedAt:Date.now(), scores:{}})} className="w-full bg-amber-600 hover:bg-amber-500 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font">INICIAR</button> : <p className="text-slate-500 animate-pulse font-bold">Esperando al anfitrión...</p>}</>}
-            {mj.phase === 'playing' && <>
-                <button onClick={tap} className={`tap-btn w-full min-h-[260px] rounded-[2rem] border-4 flex flex-col items-center justify-center ${isGold?'bg-amber-400 border-amber-200':'bg-red-700 border-red-400'}`}>
-                    <p className={`text-5xl font-black title-font ${isGold?'text-amber-950':'text-white'}`}>{isGold?'TOCA':'NO TOQUES'}</p>
-                    <p className="font-black mt-3 text-lg">Tiempo: {remaining}s</p>
-                    <p className="font-black mt-2">Tu score: {scores[myId] || 0}</p>
-                </button>
-                <div className="space-y-2">{alive.map(p=><div key={p.id} className="bg-slate-800/60 border border-slate-700 p-3 rounded-xl flex justify-between"><span>{getName(p.id)}</span><span className="text-amber-300 font-bold">{scores[p.id] || 0}</span></div>)}</div>
-            </>}
-        </div>
-    );
-}
-
-function MiniBlocksGame({ myId, isHost, roomData, alive, getName, updateMiniGame, finishInsideMiniGame }) {
-    const mj = roomData.miniGame || {};
-    const scores = mj.scores || {};
-    const [tick, setTick] = useState(Date.now());
-    const [finished, setFinished] = useState(false);
-    const activeIndex = Math.floor((tick - (mj.startedAt || tick)) / 800) % 9;
-    const elapsed = mj.startedAt ? Date.now() - mj.startedAt : 0;
-    const remaining = Math.max(0, Math.ceil(((mj.durationMs || 20000) - elapsed) / 1000));
-
-    useEffect(()=>{
-        if (mj.phase !== 'playing') return;
-        const iv = setInterval(()=>setTick(Date.now()), 200);
-        return () => clearInterval(iv);
-    }, [mj.phase]);
-
-    useEffect(()=>{
-        if (!isHost || mj.phase !== 'playing' || finished) return;
-        const t = setTimeout(()=>{
-            const ranked = alive.map(p=>({id:p.id, score:scores[p.id]||0})).sort((a,b)=>b.score-a.score);
-            setFinished(true);
-            finishInsideMiniGame(ranked[0]?.id || alive[0]?.id);
-        }, Math.max(500, (mj.durationMs || 20000) - elapsed));
-        return () => clearTimeout(t);
-    }, [isHost, mj.phase, scores, finished]);
-
-    const tapBlock = async (idx) => {
-        if (mj.phase !== 'playing') return;
-        const current = scores[myId] || 0;
-        await updateMiniGame({[`scores.${myId}`]: current + (idx===activeIndex ? 2 : -1)});
-    };
-
-    return (
-        <div className="fade-in space-y-6 pt-6 text-center">
-            <div className="text-5xl">🧱</div>
-            <h2 className="text-3xl font-black text-amber-300 title-font">MINI BLOQUES</h2>
-            {mj.phase === 'ready' && <>{isHost ? <button onClick={()=>updateMiniGame({phase:'playing', startedAt:Date.now(), scores:{}})} className="w-full bg-amber-600 hover:bg-amber-500 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font">INICIAR</button> : <p className="text-slate-500 animate-pulse font-bold">Esperando al anfitrión...</p>}</>}
-            {mj.phase === 'playing' && <>
-                <p className="text-slate-400 italic text-sm">Toca el bloque dorado. Fallar resta puntos. Tiempo: {remaining}s</p>
-                <div className="grid grid-cols-3 gap-3">{Array.from({length:9}).map((_,i)=><button key={i} onClick={()=>tapBlock(i)} className={`h-24 rounded-2xl border-2 active:scale-95 transition-all ${i===activeIndex?'bg-amber-400 border-amber-200 shadow-[0_0_25px_rgba(251,191,36,.5)]':'bg-slate-800 border-slate-700'}`}><span className="text-3xl">{i===activeIndex?'⭐':'⬛'}</span></button>)}</div>
-                <p className="text-amber-300 font-black">Tu score: {scores[myId] || 0}</p>
-                <div className="space-y-2">{alive.map(p=><div key={p.id} className="bg-slate-800/60 border border-slate-700 p-3 rounded-xl flex justify-between"><span>{getName(p.id)}</span><span className="text-amber-300 font-bold">{scores[p.id] || 0}</span></div>)}</div>
-            </>}
         </div>
     );
 }
@@ -1190,7 +855,7 @@ function CofreSetup({ myId, isHost, roomData, alive, getName, setChestTurnOrder,
                         className="p-6 rounded-2xl border-2 border-amber-700 bg-amber-900/20 text-center active:scale-95 transition-all hover:border-amber-500">
                         <div className="text-3xl mb-2">⚡</div>
                         <p className="font-black text-amber-200 text-lg title-font">MINIJUEGO</p>
-                        <p className="text-slate-400 text-sm italic mt-1">Juego de reacción: el perdedor elige primero, el ganador elige último</p>
+                        <p className="text-slate-400 text-sm italic mt-1">Se elige al azar entre reacción, memoria o secuencia. El perdedor elige primero, el ganador elige último</p>
                     </button>
                     <button onClick={()=>setMode('manual')}
                         className="p-6 rounded-2xl border-2 border-slate-700 bg-slate-800/40 text-center active:scale-95 transition-all hover:border-slate-500">
@@ -1206,11 +871,12 @@ function CofreSetup({ myId, isHost, roomData, alive, getName, setChestTurnOrder,
                     <button onClick={()=>setMode(null)} className="text-slate-500 hover:text-slate-300 text-sm">← Volver</button>
                     <div className="bg-amber-900/20 border border-amber-700/40 p-5 rounded-2xl text-center space-y-3">
                         <div className="text-4xl">⚡</div>
-                        <p className="font-black text-amber-200 text-lg title-font">JUEGO DE REACCIÓN</p>
-                        <p className="text-slate-300 text-sm italic">Aparecerá una señal. ¡Toca la pantalla lo más rápido posible!</p>
+                        <p className="font-black text-amber-200 text-lg title-font">MINIJUEGO SORPRESA</p>
+                        <p className="text-slate-300 text-sm italic">Se elige al azar uno de estos: reacción, memoria de secuencia, o tocar números en orden. ¡No sabrás cuál hasta empezar!</p>
                         <div className="text-xs text-slate-500 space-y-1 pt-2">
-                            <p>🥇 Más rápido → elige <span className="text-amber-400 font-bold">ÚLTIMO</span> (ventaja)</p>
-                            <p>🥉 Más lento → elige <span className="text-red-400 font-bold">PRIMERO</span></p>
+                            <p>🥇 Mejor desempeño → elige <span className="text-amber-400 font-bold">ÚLTIMO</span> (ventaja)</p>
+                            <p>🥉 Peor desempeño → elige <span className="text-red-400 font-bold">PRIMERO</span></p>
+                            <p className="pt-1">Si alguien no responde, el juego sigue solo después de unos segundos.</p>
                         </div>
                     </div>
                     <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40">
@@ -1257,18 +923,22 @@ function CofreSetup({ myId, isHost, roomData, alive, getName, setChestTurnOrder,
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// COFRE_MINIJUEGO  –  Juego de reacción para determinar el orden
+// COFRE_MINIJUEGO  –  Minijuego variado (reacción / memoria / secuencia) para
+// determinar el orden. Incluye watchdog para que NUNCA se quede atascado
+// esperando a alguien que no responde.
 // ════════════════════════════════════════════════════════════════════════
-function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, recordTap, finishMinijuego }) {
+const STALL_TIMEOUT_MS = 9000; // si alguien no termina en este tiempo, se le pone penalización y se sigue
+
+function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, recordTap, finishMinijuego, autoCompleteMissing }) {
     const [localCountdown, setLocalCountdown] = useState(3);
-    const [hasTriggeredGo, setHasTriggeredGo] = useState(false);
     const [hasTapped, setHasTapped] = useState(false);
     const [myReactionTime, setMyReactionTime] = useState(null);
     const mj = roomData.cofreMinijuego || {};
     const phase = mj.phase;
+    const type = mj.type || 'reaccion';
     const taps = mj.taps || {};
 
-    // Countdown on host side
+    // Countdown on host side, then GO at a random delay
     useEffect(() => {
         if (phase !== 'countdown' || !isHost || !mj.startedAt) return;
         let count = 3;
@@ -1278,9 +948,8 @@ function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, rec
             setLocalCountdown(count);
             if (count <= 0) {
                 clearInterval(iv);
-                // Random delay 1-3s then trigger GO
                 const delay = 1000 + Math.random() * 2000;
-                setTimeout(() => { triggerGo(); setHasTriggeredGo(true); }, delay);
+                setTimeout(() => { triggerGo(); }, delay);
             }
         }, 1000);
         return () => clearInterval(iv);
@@ -1302,29 +971,42 @@ function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, rec
         return () => clearInterval(iv);
     }, [phase, mj.startedAt, isHost]);
 
-    const handleTap = () => {
-        if (phase !== 'go' || hasTapped || taps[myId]) return;
+    const allTapped = alive.every(p => taps[p.id] !== undefined);
+
+    // Watchdog: the host quietly fills in a penalty time for anyone stuck/disconnected
+    // after STALL_TIMEOUT_MS, so the round can always move on.
+    useEffect(() => {
+        if (phase !== 'go' || !isHost || allTapped || !mj.goTime) return;
+        const remaining = STALL_TIMEOUT_MS - (Date.now() - mj.goTime);
+        const t = setTimeout(() => { autoCompleteMissing(); }, Math.max(0, remaining));
+        return () => clearTimeout(t);
+    }, [phase, isHost, allTapped, mj.goTime, taps]);
+
+    const handleFinish = (rt) => {
+        if (hasTapped || taps[myId] !== undefined) return;
         setHasTapped(true);
-        const rt = Date.now() - mj.goTime;
         setMyReactionTime(rt);
-        recordTap();
+        recordTap(rt);
     };
 
-    const allTapped = alive.every(p => taps[p.id]);
     const displayCount = isHost ? localCountdown : nonHostCount;
-
-    // Results sorted: fastest first
     const results = alive
         .map(p=>({id:p.id, name:getName(p.id), rt:taps[p.id]??null}))
-        .sort((a,b)=>(a.rt??99999)-(b.rt??99999));
+        .sort((a,b)=>(a.rt??Infinity)-(b.rt??Infinity));
+
+    const typeLabel = {reaccion:'⚡ REACCIÓN', secuencia:'🔢 SECUENCIA', memoria:'🧠 MEMORIA'}[type];
 
     return (
         <div className="fade-in flex flex-col items-center gap-6 pt-6 text-center">
-            <h2 className="text-3xl font-black text-amber-300 title-font">⚡ MINIJUEGO</h2>
+            <h2 className="text-3xl font-black text-amber-300 title-font">{typeLabel}</h2>
 
             {phase === 'countdown' && (
                 <div className="space-y-6">
-                    <p className="text-slate-400 italic text-sm">Prepárate... ¡toca cuando aparezca la señal!</p>
+                    <p className="text-slate-400 italic text-sm">
+                        {type==='reaccion' && 'Prepárate... ¡toca cuando aparezca la señal!'}
+                        {type==='secuencia' && 'Prepárate... ¡vas a tocar números en orden lo más rápido posible!'}
+                        {type==='memoria' && 'Prepárate... ¡vas a memorizar una secuencia de botones!'}
+                    </p>
                     <div className="w-40 h-40 mx-auto rounded-full border-4 border-amber-700 bg-amber-900/20 flex items-center justify-center" style={{boxShadow:'0 0 30px rgba(217,119,6,.3)'}}>
                         <span className="text-7xl font-black text-amber-300 title-font countdown-num" key={displayCount}>{displayCount > 0 ? displayCount : '...'}</span>
                     </div>
@@ -1332,36 +1014,30 @@ function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, rec
                 </div>
             )}
 
-            {phase === 'go' && !allTapped && (
-                <div className="space-y-6 w-full">
-                    <div className="go-signal bg-amber-400 text-amber-900 text-5xl font-black py-6 rounded-2xl title-font shadow-[0_0_40px_rgba(251,191,36,.5)]">
-                        ¡¡YA!!
-                    </div>
-                    {!hasTapped ? (
-                        <button onPointerDown={handleTap}
-                            className="tap-btn w-full h-40 bg-amber-600 hover:bg-amber-500 rounded-[2rem] text-3xl font-black title-font shadow-2xl flex flex-col items-center justify-center gap-2 active:scale-95"
-                            style={{boxShadow:'0 0 30px rgba(217,119,6,.4)'}}>
-                            <span className="text-5xl">👆</span>
-                            <span>¡TOCA!</span>
-                        </button>
-                    ) : (
-                        <div className="bg-emerald-900/30 border border-emerald-700 p-6 rounded-2xl">
-                            <div className="text-3xl mb-2">✅</div>
-                            <p className="text-emerald-300 font-black text-xl">{myReactionTime}ms</p>
-                            <p className="text-slate-400 text-sm italic mt-1">Esperando a los demás...</p>
-                            <div className="flex justify-center gap-3 mt-4 flex-wrap">
-                                {alive.map(p=>(
-                                    <div key={p.id} className={`px-3 py-1 rounded-full text-xs font-bold ${taps[p.id]?'bg-emerald-900/50 border border-emerald-700 text-emerald-300':'bg-slate-800 border border-slate-700 text-slate-500 animate-pulse'}`}>
-                                        {getName(p.id)} {taps[p.id]?'✓':'...'}
-                                    </div>
-                                ))}
+            {phase === 'go' && !allTapped && !hasTapped && (
+                <>
+                    {type==='reaccion' && <ReaccionGame onFinish={handleFinish} />}
+                    {type==='secuencia' && <SecuenciaGame onFinish={handleFinish} />}
+                    {type==='memoria' && <MemoriaGame onFinish={handleFinish} />}
+                </>
+            )}
+
+            {phase === 'go' && !allTapped && hasTapped && (
+                <div className="bg-emerald-900/30 border border-emerald-700 p-6 rounded-2xl w-full">
+                    <div className="text-3xl mb-2">✅</div>
+                    <p className="text-emerald-300 font-black text-xl">¡Listo!</p>
+                    <p className="text-slate-400 text-sm italic mt-1">Esperando a los demás...</p>
+                    <div className="flex justify-center gap-3 mt-4 flex-wrap">
+                        {alive.map(p=>(
+                            <div key={p.id} className={`px-3 py-1 rounded-full text-xs font-bold ${taps[p.id]!==undefined?'bg-emerald-900/50 border border-emerald-700 text-emerald-300':'bg-slate-800 border border-slate-700 text-slate-500 animate-pulse'}`}>
+                                {getName(p.id)} {taps[p.id]!==undefined?'✓':'...'}
                             </div>
-                        </div>
-                    )}
+                        ))}
+                    </div>
                 </div>
             )}
 
-            {(phase === 'go' && allTapped) || phase === 'done' ? (
+            {allTapped && (
                 <div className="w-full space-y-4">
                     <p className="text-amber-300 font-black text-xl title-font">RESULTADOS</p>
                     <div className="space-y-3">
@@ -1372,7 +1048,7 @@ function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, rec
                                     <span className={`font-bold text-lg ${r.id===myId?'text-amber-300':'text-slate-200'}`}>{r.name}{r.id===myId?' (Tú)':''}</span>
                                 </div>
                                 <div className="text-right">
-                                    <p className="font-black text-amber-200">{r.rt}ms</p>
+                                    <p className="font-black text-amber-200">{r.rt>=999999?'sin respuesta':`${r.rt}ms`}</p>
                                     <p className="text-xs text-slate-500">{i===0?'→ elige último':i===results.length-1?'→ elige primero':'→ elige segundo'}</p>
                                 </div>
                             </div>
@@ -1387,14 +1063,118 @@ function CofreMinijuego({ myId, isHost, roomData, alive, getName, triggerGo, rec
                     )}
                     {!isHost && <p className="text-slate-500 animate-pulse font-bold pb-10">Esperando al anfitrión...</p>}
                 </div>
-            ) : null}
-
-            {/* Waiting for go (non-tappers) */}
-            {phase === 'go' && !allTapped && !hasTapped && alive.every(p=>taps[p.id]!==undefined) && (
-                <div className="text-center space-y-2">
-                    <p className="text-slate-400 text-sm">Esperando tapeos...</p>
-                </div>
             )}
+        </div>
+    );
+}
+
+// Variant 1: classic reaction tap
+function ReaccionGame({ onFinish }) {
+    const startRef = useRef(Date.now());
+    return (
+        <div className="space-y-6 w-full">
+            <div className="go-signal bg-amber-400 text-amber-900 text-5xl font-black py-6 rounded-2xl title-font shadow-[0_0_40px_rgba(251,191,36,.5)]">¡¡YA!!</div>
+            <button onPointerDown={()=>onFinish(Date.now()-startRef.current)}
+                className="tap-btn w-full h-40 bg-amber-600 hover:bg-amber-500 rounded-[2rem] text-3xl font-black title-font shadow-2xl flex flex-col items-center justify-center gap-2 active:scale-95"
+                style={{boxShadow:'0 0 30px rgba(217,119,6,.4)'}}>
+                <span className="text-5xl">👆</span><span>¡TOCA!</span>
+            </button>
+        </div>
+    );
+}
+
+// Variant 2: tap numbers 1→6 in ascending order, fastest total time wins
+function SecuenciaGame({ onFinish }) {
+    const startRef = useRef(Date.now());
+    const order = useRef([1,2,3,4,5,6].sort(()=>Math.random()-.5)).current;
+    const [next, setNext] = useState(1);
+    const [wrong, setWrong] = useState(null);
+
+    const tapNum = (n) => {
+        if (n === next) {
+            if (n === 6) { onFinish(Date.now()-startRef.current); return; }
+            setNext(next+1);
+        } else {
+            setWrong(n);
+            setTimeout(()=>setWrong(null), 250);
+        }
+    };
+
+    return (
+        <div className="space-y-4 w-full">
+            <div className="go-signal bg-amber-400 text-amber-900 text-2xl font-black py-3 rounded-2xl title-font shadow-[0_0_30px_rgba(251,191,36,.5)]">
+                Toca del 1 al 6 en orden — vas en el {next}
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+                {order.map(n=>(
+                    <button key={n} onPointerDown={()=>tapNum(n)} disabled={n<next}
+                        className={`h-20 rounded-2xl text-3xl font-black title-font transition-all active:scale-90
+                            ${n<next?'bg-emerald-800/40 text-emerald-500 border-2 border-emerald-700':
+                              wrong===n?'bg-red-600 text-white border-2 border-red-400':
+                              'bg-amber-600 hover:bg-amber-500 text-amber-50 border-2 border-amber-400'}`}>
+                        {n<next?'✓':n}
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+// Variant 3: memorize a flashed sequence of 4 tiles, then repeat it; total time + mistake penalty
+function MemoriaGame({ onFinish }) {
+    const COLORS = ['#ef4444','#3b82f6','#10b981','#f59e0b'];
+    const seq = useRef(Array.from({length:4},()=>Math.floor(Math.random()*4))).current;
+    const [showing, setShowing] = useState(true);
+    const [flashIdx, setFlashIdx] = useState(-1);
+    const [input, setInput] = useState([]);
+    const [wrong, setWrong] = useState(false);
+    const startRef = useRef(null);
+
+    useEffect(() => {
+        let i = 0;
+        const step = () => {
+            setFlashIdx(seq[i]);
+            setTimeout(()=>{
+                setFlashIdx(-1);
+                i++;
+                if (i < seq.length) setTimeout(step, 300);
+                else setTimeout(()=>{ setShowing(false); startRef.current = Date.now(); }, 500);
+            }, 550);
+        };
+        step();
+    }, []);
+
+    const tapColor = (idx) => {
+        if (showing) return;
+        const pos = input.length;
+        if (seq[pos] === idx) {
+            const newInput = [...input, idx];
+            setInput(newInput);
+            if (newInput.length === seq.length) {
+                onFinish(Date.now() - startRef.current);
+            }
+        } else {
+            setWrong(true);
+            setTimeout(()=>setWrong(false), 250);
+            // penalty: small time added by pushing start back, keeps it fair but not punishing
+            startRef.current -= 400;
+        }
+    };
+
+    return (
+        <div className="space-y-4 w-full">
+            <div className="go-signal bg-amber-400 text-amber-900 text-lg font-black py-3 rounded-2xl title-font">
+                {showing ? 'Memoriza la secuencia...' : `Repítela (${input.length}/${seq.length})`}
+            </div>
+            <div className={`grid grid-cols-2 gap-3 ${wrong?'opacity-60':''}`}>
+                {COLORS.map((c,idx)=>(
+                    <button key={idx} onPointerDown={()=>tapColor(idx)} disabled={showing}
+                        className="h-24 rounded-2xl border-4 transition-all active:scale-90"
+                        style={{background:c, borderColor: flashIdx===idx?'white':'transparent', opacity: flashIdx===idx?1:(showing?0.5:1)}}>
+                    </button>
+                ))}
+            </div>
+            {wrong && <p className="text-red-400 text-sm font-bold">¡Incorrecto! Sigue intentando.</p>}
         </div>
     );
 }
