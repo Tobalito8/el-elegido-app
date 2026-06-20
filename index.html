@@ -51,13 +51,24 @@
 <body>
 <div id="root"></div>
 
-<script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
-    import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script>
     const firebaseConfig = { apiKey:"AIzaSyAuqx6NzLsOfdYM0FlRDaXXCY77FB2gtUI",authDomain:"el-elegido-juego.firebaseapp.com",projectId:"el-elegido-juego",storageBucket:"el-elegido-juego.firebasestorage.app",messagingSenderId:"183753048942",appId:"1:183753048942:web:37b6660e2e84ed445b777f" };
-    const app = initializeApp(firebaseConfig);
-    const db = getFirestore(app);
-    window.db=db; window.firebaseDoc=doc; window.firebaseSetDoc=setDoc; window.firebaseGetDoc=getDoc; window.firebaseUpdateDoc=updateDoc; window.firebaseOnSnapshot=onSnapshot; window.firebaseDeleteDoc=deleteDoc;
+    const app = firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    window.db = db;
+    window.firebaseDoc = (database, col, id) => database.collection(col).doc(id);
+    window.firebaseSetDoc = (ref, data) => ref.set(data);
+    window.firebaseGetDoc = async (ref) => {
+        const snap = await ref.get();
+        return { exists: () => snap.exists, data: () => snap.data() };
+    };
+    window.firebaseUpdateDoc = (ref, data) => ref.update(data);
+    window.firebaseOnSnapshot = (ref, cb) => ref.onSnapshot(snap => {
+        cb({ exists: () => snap.exists, data: () => snap.data() });
+    });
+    window.firebaseDeleteDoc = (ref) => ref.delete();
     window.dispatchEvent(new Event('firebaseReady'));
 </script>
 
