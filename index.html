@@ -585,6 +585,8 @@ function App() {
       currentGame: null,
       roundWinner: null,
       immunePlayerId: null,
+      roundGameMode: 'app',
+      roundMinigame: null,
       chestOwners: null,
       chestMoneyIndex: null,
       chestTurnOrder: null,
@@ -654,12 +656,30 @@ function App() {
   const removeGame = async i => await upd({
     games: (roomData.games || []).filter((_, idx) => idx !== i)
   });
+  const ROUND_MINIGAME_TYPES = ['reaccion', 'secuencia', 'memoria'];
+  const setRoundGameMode = async mode => await upd({
+    roundGameMode: mode
+  });
+
+  // Decides what game powers this round: either one of the built-in in-app
+  // minigames, or one of the host's custom "play it outside the app" games.
+  const pickRoundGame = () => {
+    if (roomData.roundGameMode === 'custom' && roomData.games?.length) {
+      return {
+        external: roomData.games[Math.floor(Math.random() * roomData.games.length)]
+      };
+    }
+    const type = ROUND_MINIGAME_TYPES[Math.floor(Math.random() * ROUND_MINIGAME_TYPES.length)];
+    return {
+      appGame: type
+    };
+  };
   const startGame = async () => {
     const alive = roomData.players.filter(p => p.isAlive);
     if (alive.length < 2) return;
     const chosenId = alive[Math.floor(Math.random() * alive.length)].id;
     const chosenHash = btoa(chosenId + roomCode);
-    const game = roomData.games?.length ? roomData.games[Math.floor(Math.random() * roomData.games.length)] : null;
+    const game = pickRoundGame();
     await upd({
       status: GS.JUGANDO,
       chosenHash,
@@ -667,7 +687,14 @@ function App() {
       ghostMessages: [],
       currentGame: game,
       roundWinner: null,
-      immunePlayerId: null
+      immunePlayerId: null,
+      roundMinigame: game.appGame ? {
+        type: game.appGame,
+        phase: 'countdown',
+        startedAt: Date.now(),
+        goTime: null,
+        taps: {}
+      } : null
     });
   };
   const startVoting = async () => await upd({
@@ -773,16 +800,67 @@ function App() {
         }))
       });
     } else {
-      const game = roomData.games?.length ? roomData.games[Math.floor(Math.random() * roomData.games.length)] : null;
+      const game = pickRoundGame();
       await upd({
         status: GS.JUGANDO,
         currentGame: game,
         votes: {},
         ghostMessages: [],
         immunePlayerId: null,
-        lastVictim: null
+        lastVictim: null,
+        roundMinigame: game.appGame ? {
+          type: game.appGame,
+          phase: 'countdown',
+          startedAt: Date.now(),
+          goTime: null,
+          taps: {}
+        } : null
       });
     }
+  };
+
+  // ── Round in-app minigame actions ─────────────────────────────────────────
+  const triggerRoundGo = async () => await upd({
+    'roundMinigame.phase': 'go',
+    'roundMinigame.goTime': Date.now()
+  });
+  const recordRoundTap = async rt => {
+    const goTime = roomData.roundMinigame?.goTime;
+    if (!goTime) return;
+    const finalRt = rt === undefined || rt === null ? Date.now() - goTime : rt;
+    await upd({
+      [`roundMinigame.taps.${myId}`]: finalRt
+    });
+  };
+  const autoCompleteRoundMissing = async () => {
+    const alive = roomData.players.filter(p => p.isAlive);
+    const taps = {
+      ...(roomData.roundMinigame?.taps || {})
+    };
+    let changed = false;
+    alive.forEach(p => {
+      if (taps[p.id] === undefined) {
+        taps[p.id] = PENALTY_RT;
+        changed = true;
+      }
+    });
+    if (changed) await upd({
+      'roundMinigame.taps': taps
+    });
+  };
+  const finishRoundMinigame = async () => {
+    const taps = roomData.roundMinigame?.taps || {};
+    const alive = roomData.players.filter(p => p.isAlive);
+    // If literally nobody managed to finish, nobody gets immunity — never force a pick.
+    const finishers = alive.filter(p => taps[p.id] !== undefined && taps[p.id] < PENALTY_RT);
+    let winnerId = null;
+    if (finishers.length > 0) {
+      winnerId = finishers.reduce((best, p) => taps[p.id] < taps[best.id] ? p : best).id;
+    }
+    await upd({
+      immunePlayerId: winnerId,
+      roundWinner: winnerId
+    });
   };
 
   // ── Chest round actions ───────────────────────────────────────────────────
@@ -1040,6 +1118,22 @@ function App() {
   }), p.name, " ", p.id === myId ? '(Tú)' : ''), /*#__PURE__*/React.createElement("div", {
     className: "w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_#10b981]"
   })))), isHost && /*#__PURE__*/React.createElement("div", {
+    className: "bg-slate-800/40 p-4 rounded-2xl border border-slate-700/50 space-y-3"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-xs font-bold text-slate-500 uppercase tracking-widest"
+  }, "Juego de cada ronda"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRoundGameMode('app'),
+    className: `p-3 rounded-xl border-2 text-sm font-bold transition-all ${roomData.roundGameMode !== 'custom' ? 'border-amber-500 bg-amber-900/20 text-amber-200' : 'border-slate-700 bg-slate-800/50 text-slate-400'}`
+  }, "🎮 Minijuegos de la App"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRoundGameMode('custom'),
+    className: `p-3 rounded-xl border-2 text-sm font-bold transition-all ${roomData.roundGameMode === 'custom' ? 'border-amber-500 bg-amber-900/20 text-amber-200' : 'border-slate-700 bg-slate-800/50 text-slate-400'}`
+  }, "📋 Mis juegos (fuera de la app)")), roomData.roundGameMode !== 'custom' ? /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-slate-500 italic"
+  }, "Cada ronda se jugará un minijuego al azar dentro de la app (reacción, memoria o secuencia). Quien gane queda inmune a la votación.") : /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-slate-500 italic"
+  }, "Cada ronda se elegirá al azar uno de tus juegos personalizados, jugado por fuera, y tú elegirás manualmente al ganador.")), isHost && roomData.roundGameMode === 'custom' && /*#__PURE__*/React.createElement("div", {
     className: "bg-slate-800/40 p-4 rounded-2xl border border-slate-700/50 space-y-3 mb-20"
   }, /*#__PURE__*/React.createElement("p", {
     className: "text-xs font-bold text-slate-500 uppercase tracking-widest"
@@ -1074,21 +1168,23 @@ function App() {
     className: "w-3 h-3"
   }, /*#__PURE__*/React.createElement("path", {
     d: "M18 6 6 18M6 6l12 12"
-  }))))))), isHost && /*#__PURE__*/React.createElement("div", {
+  }))))), (roomData.games || []).length === 0 && /*#__PURE__*/React.createElement("span", {
+    className: "text-slate-600 text-xs italic"
+  }, "Agrega al menos uno, o el juego usará minijuegos de la app por defecto."))), isHost && /*#__PURE__*/React.createElement("div", {
     className: "fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: startGame,
     disabled: roomData.players.length < 2,
     className: "w-full bg-amber-700 hover:bg-amber-600 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 disabled:opacity-50 title-font transition-colors"
-  }, "COMENZAR PARTIDA"))), gameState === GS.JUGANDO && roomData && /*#__PURE__*/React.createElement(React.Fragment, null, roomData.currentGame && /*#__PURE__*/React.createElement("p", {
+  }, "COMENZAR PARTIDA"))), gameState === GS.JUGANDO && roomData && /*#__PURE__*/React.createElement(React.Fragment, null, roomData.currentGame?.external && /*#__PURE__*/React.createElement("p", {
     className: "text-center text-sm text-slate-400 mb-4"
   }, "Juego: ", /*#__PURE__*/React.createElement("span", {
     className: "font-bold text-amber-200"
-  }, roomData.currentGame)), isHost && roomData.currentGame && /*#__PURE__*/React.createElement("div", {
+  }, roomData.currentGame.external)), isHost && roomData.currentGame?.external && /*#__PURE__*/React.createElement("div", {
     className: "mb-4 space-y-2"
   }, /*#__PURE__*/React.createElement("p", {
     className: "text-xs font-bold text-slate-500 uppercase tracking-widest mb-2"
-  }, "Ganador del juego"), alive.map(p => /*#__PURE__*/React.createElement("button", {
+  }, "Ganador del juego (opcional, nadie queda inmune si no eliges a alguien)"), alive.map(p => /*#__PURE__*/React.createElement("button", {
     key: p.id,
     onClick: () => upd({
       roundWinner: p.id,
@@ -1099,7 +1195,17 @@ function App() {
     className: `font-bold ${roomData.immunePlayerId === p.id ? 'text-amber-300' : 'text-slate-200'}`
   }, p.name), roomData.immunePlayerId === p.id && /*#__PURE__*/React.createElement(AwardIcon, {
     c: "w-5 h-5 text-amber-400"
-  })))), /*#__PURE__*/React.createElement("div", {
+  })))), roomData.currentGame?.appGame && amIAlive && /*#__PURE__*/React.createElement(RoundMinigame, {
+    myId: myId,
+    isHost: isHost,
+    roomData: roomData,
+    alive: alive,
+    getName: getName,
+    triggerRoundGo: triggerRoundGo,
+    recordRoundTap: recordRoundTap,
+    finishRoundMinigame: finishRoundMinigame,
+    autoCompleteRoundMissing: autoCompleteRoundMissing
+  }), /*#__PURE__*/React.createElement("div", {
     className: "fade-in space-y-8 py-4 flex flex-col items-center"
   }, amIAlive ? /*#__PURE__*/React.createElement("div", {
     className: "w-full"
@@ -1779,6 +1885,142 @@ function MemoriaGame({
     className: "text-red-400 text-sm font-bold"
   }, "¡Incorrecto! Sigue intentando."));
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// RoundMinigame – minijuego de la app jugado ENTRE rondas para decidir quién
+// queda inmune a la votación. Si nadie llega a terminar, nadie queda inmune
+// (nunca se queda atorada la pantalla ni se fuerza una selección).
+// ════════════════════════════════════════════════════════════════════════
+function RoundMinigame({
+  myId,
+  isHost,
+  roomData,
+  alive,
+  getName,
+  triggerRoundGo,
+  recordRoundTap,
+  finishRoundMinigame,
+  autoCompleteRoundMissing
+}) {
+  const [localCountdown, setLocalCountdown] = useState(3);
+  const [hasTapped, setHasTapped] = useState(false);
+  const mj = roomData.roundMinigame || {};
+  const phase = mj.phase;
+  const type = mj.type || 'reaccion';
+  const taps = mj.taps || {};
+  useEffect(() => {
+    if (phase !== 'countdown' || !isHost || !mj.startedAt) return;
+    let count = 3;
+    setLocalCountdown(3);
+    const iv = setInterval(() => {
+      count--;
+      setLocalCountdown(count);
+      if (count <= 0) {
+        clearInterval(iv);
+        const delay = 1000 + Math.random() * 2000;
+        setTimeout(() => {
+          triggerRoundGo();
+        }, delay);
+      }
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [phase, mj.startedAt, isHost]);
+  const [nonHostCount, setNonHostCount] = useState(3);
+  useEffect(() => {
+    if (phase !== 'countdown' || isHost || !mj.startedAt) return;
+    const elapsed = Date.now() - mj.startedAt;
+    let startCount = Math.max(1, 3 - Math.floor(elapsed / 1000));
+    setNonHostCount(startCount);
+    let c = startCount;
+    const iv = setInterval(() => {
+      c--;
+      setNonHostCount(c);
+      if (c <= 0) clearInterval(iv);
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [phase, mj.startedAt, isHost]);
+  const allTapped = alive.every(p => taps[p.id] !== undefined);
+
+  // Watchdog so this round game can never get the screen stuck.
+  useEffect(() => {
+    if (phase !== 'go' || !isHost || allTapped || !mj.goTime) return;
+    const remaining = STALL_TIMEOUT_MS - (Date.now() - mj.goTime);
+    const t = setTimeout(() => {
+      autoCompleteRoundMissing();
+    }, Math.max(0, remaining));
+    return () => clearTimeout(t);
+  }, [phase, isHost, allTapped, mj.goTime, taps]);
+
+  // As soon as results are in, the host finalizes immunity automatically (once).
+  const finishedRef = useRef(false);
+  useEffect(() => {
+    if (allTapped && isHost && !finishedRef.current) {
+      finishedRef.current = true;
+      finishRoundMinigame();
+    }
+    if (!allTapped) finishedRef.current = false;
+  }, [allTapped, isHost]);
+  const handleFinish = rt => {
+    if (hasTapped || taps[myId] !== undefined) return;
+    setHasTapped(true);
+    recordRoundTap(rt);
+  };
+  const displayCount = isHost ? localCountdown : nonHostCount;
+  const typeLabel = {
+    reaccion: '⚡ REACCIÓN',
+    secuencia: '🔢 SECUENCIA',
+    memoria: '🧠 MEMORIA'
+  }[type];
+  const results = allTapped ? alive.map(p => ({
+    id: p.id,
+    name: getName(p.id),
+    rt: taps[p.id]
+  })).sort((a, b) => a.rt - b.rt) : [];
+  const winnerId = results.length && results[0].rt < PENALTY_RT_CLIENT ? results[0].id : null;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fade-in flex flex-col items-center gap-4 pt-2 pb-6 text-center bg-slate-800/40 border border-slate-700/50 rounded-2xl p-4"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "text-xl font-black text-amber-300 title-font"
+  }, typeLabel, " ", /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-slate-500 font-normal"
+  }, "(quien gane queda inmune)")), phase === 'countdown' && /*#__PURE__*/React.createElement("div", {
+    className: "space-y-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "w-28 h-28 mx-auto rounded-full border-4 border-amber-700 bg-amber-900/20 flex items-center justify-center"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-5xl font-black text-amber-300 title-font countdown-num",
+    key: displayCount
+  }, displayCount > 0 ? displayCount : '...')), /*#__PURE__*/React.createElement("p", {
+    className: "text-slate-500 text-sm italic animate-pulse"
+  }, "Espera la señal...")), phase === 'go' && !hasTapped && taps[myId] === undefined && /*#__PURE__*/React.createElement(React.Fragment, null, type === 'reaccion' && /*#__PURE__*/React.createElement(ReaccionGame, {
+    onFinish: handleFinish
+  }), type === 'secuencia' && /*#__PURE__*/React.createElement(SecuenciaGame, {
+    onFinish: handleFinish
+  }), type === 'memoria' && /*#__PURE__*/React.createElement(MemoriaGame, {
+    onFinish: handleFinish
+  })), phase === 'go' && !allTapped && (hasTapped || taps[myId] !== undefined) && /*#__PURE__*/React.createElement("div", {
+    className: "bg-emerald-900/30 border border-emerald-700 p-4 rounded-2xl w-full"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-emerald-300 font-black"
+  }, "✅ ¡Listo! Esperando a los demás..."), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-center gap-2 mt-3 flex-wrap"
+  }, alive.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    className: `px-3 py-1 rounded-full text-xs font-bold ${taps[p.id] !== undefined ? 'bg-emerald-900/50 border border-emerald-700 text-emerald-300' : 'bg-slate-800 border border-slate-700 text-slate-500 animate-pulse'}`
+  }, getName(p.id), " ", taps[p.id] !== undefined ? '✓' : '...')))), allTapped && /*#__PURE__*/React.createElement("div", {
+    className: "w-full space-y-2"
+  }, results.map((r, i) => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    className: `p-3 rounded-xl border flex justify-between items-center ${r.id === winnerId ? 'border-amber-500 bg-amber-900/20' : 'border-slate-700 bg-slate-800/40'}`
+  }, /*#__PURE__*/React.createElement("span", {
+    className: `font-bold ${r.id === myId ? 'text-amber-300' : 'text-slate-300'}`
+  }, r.id === winnerId ? '👑 ' : '', r.name, r.id === myId ? ' (Tú)' : ''), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-slate-500"
+  }, r.rt >= PENALTY_RT_CLIENT ? 'sin respuesta' : `${r.rt}ms`))), !winnerId && /*#__PURE__*/React.createElement("p", {
+    className: "text-slate-500 text-sm italic"
+  }, "Nadie completó el reto a tiempo — nadie queda inmune esta ronda.")));
+}
+const PENALTY_RT_CLIENT = 999999;
 
 // ════════════════════════════════════════════════════════════════════════
 // COFRE_TURNO  –  Jugadores eligen / intercambian cofres
