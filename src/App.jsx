@@ -299,15 +299,7 @@ export default function App() {
       currentGame: game,
       roundWinner: null,
       immunePlayerId: null,
-      roundMinigame: game.appGame
-        ? {
-            type: game.appGame,
-            phase: "countdown",
-            startedAt: Date.now(),
-            goTime: null,
-            taps: {},
-          }
-        : null,
+      roundMinigame: null,
     });
   };
   const startVoting = async () =>
@@ -432,20 +424,26 @@ export default function App() {
         ghostMessages: [],
         immunePlayerId: null,
         lastVictim: null,
-        roundMinigame: game.appGame
-          ? {
-              type: game.appGame,
-              phase: "countdown",
-              startedAt: Date.now(),
-              goTime: null,
-              taps: {},
-            }
-          : null,
+        roundMinigame: null,
       });
     }
   };
 
   // ── Round in-app minigame actions ─────────────────────────────────────────
+  // Host decides when the minigame actually pops up, so players who were just
+  // eliminated get a moment to chat / dare the Elegido before it takes over.
+  const startRoundMinigame = async () => {
+    if (!roomData.currentGame?.appGame) return;
+    await upd({
+      roundMinigame: {
+        type: roomData.currentGame.appGame,
+        phase: "countdown",
+        startedAt: Date.now(),
+        goTime: null,
+        taps: {},
+      },
+    });
+  };
   const triggerRoundGo = async () =>
     await upd({
       "roundMinigame.phase": "go",
@@ -939,7 +937,9 @@ export default function App() {
                 ))}
               </div>
             )}
-            {roomData.currentGame?.appGame && amIAlive && (
+            {roomData.currentGame?.appGame &&
+              roomData.roundMinigame &&
+              amIAlive && (
               <RoundMinigame
                 myId={myId}
                 isHost={isHost}
@@ -1052,7 +1052,15 @@ export default function App() {
                 </div>
               )}
               {isHost && (
-                <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40">
+                <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40 space-y-2">
+                  {roomData.currentGame?.appGame && !roomData.roundMinigame && (
+                    <button
+                      onClick={startRoundMinigame}
+                      className="w-full bg-amber-700 hover:bg-amber-600 p-4 rounded-2xl font-black text-lg shadow-2xl active:scale-95 title-font transition-colors"
+                    >
+                      ⚡ MOSTRAR MINIJUEGO
+                    </button>
+                  )}
                   <button
                     onClick={startVoting}
                     className="w-full bg-slate-200 text-slate-900 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font"
