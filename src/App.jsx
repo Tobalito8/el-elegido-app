@@ -41,6 +41,7 @@ export default function App() {
   const [myId, setMyId] = useState("");
   const [error, setError] = useState("");
   const [ghostMessage, setGhostMessage] = useState("");
+  const [taskText, setTaskText] = useState("");
   const [isRevealingRole, setIsRevealingRole] = useState(false);
   const [newGameName, setNewGameName] = useState("");
   const [selectingSwapTarget, setSelectingSwapTarget] = useState(false);
@@ -173,6 +174,8 @@ export default function App() {
       lastVictim: null,
       victimWasChosen: false,
       ghostMessages: [],
+      taskAssignerId: null,
+      currentTask: null,
       games: [],
       currentGame: null,
       roundWinner: null,
@@ -296,6 +299,8 @@ export default function App() {
       chosenHash,
       votes: {},
       ghostMessages: [],
+      taskAssignerId: null,
+      currentTask: null,
       currentGame: game,
       roundWinner: null,
       immunePlayerId: null,
@@ -326,6 +331,14 @@ export default function App() {
       ghostMessages: msgs,
     });
     setGhostMessage("");
+  };
+  const assignTask = async () => {
+    if (!taskText.trim()) return;
+    if (roomData.taskAssignerId !== myId || roomData.currentTask) return;
+    await upd({
+      currentTask: taskText.trim(),
+    });
+    setTaskText("");
   };
   const finishVoting = async () => {
     const voteCounts = {};
@@ -414,14 +427,22 @@ export default function App() {
           ...p,
           isAlive: true,
         })),
+        taskAssignerId: null,
+        currentTask: null,
       });
     } else {
       const game = pickRoundGame();
+      const ghosts = roomData.players.filter((p) => !p.isAlive);
+      const taskAssignerId = ghosts.length
+        ? ghosts[Math.floor(Math.random() * ghosts.length)].id
+        : null;
       await upd({
         status: GS.JUGANDO,
         currentGame: game,
         votes: {},
         ghostMessages: [],
+        taskAssignerId,
+        currentTask: null,
         immunePlayerId: null,
         lastVictim: null,
         roundMinigame: null,
@@ -1007,6 +1028,43 @@ export default function App() {
                   </p>
                 </div>
               )}
+              {(!amIAlive || (amIAlive && amIChosen)) &&
+                roomData.taskAssignerId && (
+                  <div className="bg-slate-900 border-2 border-amber-700/50 rounded-2xl p-4 w-full space-y-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500 flex items-center gap-2">
+                      🎯 Tarea de la ronda
+                    </p>
+                    {roomData.currentTask ? (
+                      <p className="text-amber-100 text-sm italic">
+                        "{roomData.currentTask}"
+                      </p>
+                    ) : myId === roomData.taskAssignerId ? (
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          placeholder="Asígnale una tarea al Elegido..."
+                          className="flex-1 bg-slate-800 px-3 py-2 rounded-xl text-sm outline-none text-white"
+                          value={taskText}
+                          onChange={(e) => setTaskText(e.target.value)}
+                          onKeyPress={(e) =>
+                            e.key === "Enter" && assignTask()
+                          }
+                        />
+                        <button
+                          onClick={assignTask}
+                          className="bg-amber-700 hover:bg-amber-600 px-4 py-2 rounded-xl text-sm font-bold transition-colors"
+                        >
+                          Asignar
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-slate-500 text-xs italic animate-pulse">
+                        Un fantasma está eligiendo una tarea para el
+                        Elegido...
+                      </p>
+                    )}
+                  </div>
+                )}
               {(!amIAlive || (amIAlive && amIChosen)) && (
                 <div className="bg-slate-900 border-2 border-slate-700 rounded-2xl flex flex-col h-[280px] w-full">
                   <div className="bg-slate-800 p-3 text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2 border-b border-slate-700">
