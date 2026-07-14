@@ -1,0 +1,240 @@
+@import url("https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap");
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #0a0a14;
+  color: white;
+  font-family: "Crimson Pro", Georgia, serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#root {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+.app-container {
+  width: 100%;
+  max-width: 500px;
+  min-height: 100vh;
+  background: #0a0a14;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.fade-in {
+  animation: fadeIn 0.4s ease-out;
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.ghost-msg {
+  animation: slideIn 0.3s ease-out;
+  border-left: 3px solid #ef4444;
+}
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.title-font {
+  font-family: "Cinzel Decorative", serif;
+}
+.ambient-bg {
+  background:
+    radial-gradient(
+      ellipse at 50% 0%,
+      rgba(99, 67, 10, 0.15) 0%,
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse at 80% 80%,
+      rgba(30, 27, 75, 0.2) 0%,
+      transparent 60%
+    ),
+    #0a0a14;
+}
+
+/* Chests */
+.chest-card {
+  transition: transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.chest-glow-gold {
+  box-shadow:
+    0 0 30px 8px rgba(251, 191, 36, 0.5),
+    0 0 60px 20px rgba(251, 191, 36, 0.2);
+  animation: goldPulse 1.5s ease-in-out infinite;
+}
+@keyframes goldPulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 30px 8px rgba(251, 191, 36, 0.5),
+      0 0 60px 20px rgba(251, 191, 36, 0.2);
+  }
+  50% {
+    box-shadow:
+      0 0 45px 14px rgba(251, 191, 36, 0.7),
+      0 0 80px 30px rgba(251, 191, 36, 0.35);
+  }
+}
+.chest-reveal {
+  animation: chestReveal 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+@keyframes chestReveal {
+  0% {
+    transform: scale(1) rotate(0deg);
+  }
+  30% {
+    transform: scale(1.2) rotate(-5deg);
+  }
+  60% {
+    transform: scale(1.3) rotate(5deg);
+  }
+  100% {
+    transform: scale(1.1) rotate(0deg);
+  }
+}
+.turn-indicator {
+  animation: turnPulse 2s ease-in-out infinite;
+}
+@keyframes turnPulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(0.97);
+  }
+}
+
+/* Minigame */
+.tap-btn {
+  transition: all 0.1s;
+}
+.tap-btn:active {
+  transform: scale(0.92);
+}
+.countdown-num {
+  animation: countAnim 0.5s ease-out;
+}
+@keyframes countAnim {
+  from {
+    opacity: 0;
+    transform: scale(2);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.go-signal {
+  animation: goAnim 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes goAnim {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.result-row {
+  animation: resultSlide 0.4s ease-out both;
+}
+@keyframes resultSlide {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Notify */
+.elegido-pulse {
+  animation: elegidoPulse 2s ease-in-out infinite;
+}
+@keyframes elegidoPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
+  }
+}
+
+/* Winner rays */
+.winner-rays {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(251, 191, 36, 0.08) 10deg,
+    transparent 20deg,
+    transparent 30deg,
+    rgba(251, 191, 36, 0.08) 40deg,
+    transparent 50deg,
+    transparent 60deg,
+    rgba(251, 191, 36, 0.08) 70deg,
+    transparent 80deg,
+    transparent 90deg,
+    rgba(251, 191, 36, 0.08) 100deg,
+    transparent 110deg,
+    transparent 120deg,
+    rgba(251, 191, 36, 0.08) 130deg,
+    transparent 140deg,
+    transparent 150deg,
+    rgba(251, 191, 36, 0.08) 160deg,
+    transparent 170deg,
+    transparent 180deg,
+    rgba(251, 191, 36, 0.08) 190deg,
+    transparent 200deg,
+    transparent 210deg,
+    rgba(251, 191, 36, 0.08) 220deg,
+    transparent 230deg,
+    transparent 240deg,
+    rgba(251, 191, 36, 0.08) 250deg,
+    transparent 260deg,
+    transparent 270deg,
+    rgba(251, 191, 36, 0.08) 280deg,
+    transparent 290deg,
+    transparent 300deg,
+    rgba(251, 191, 36, 0.08) 310deg,
+    transparent 320deg,
+    transparent 330deg,
+    rgba(251, 191, 36, 0.08) 340deg,
+    transparent 350deg,
+    transparent 360deg
+  );
+  animation: rotate 20s linear infinite;
+}
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
