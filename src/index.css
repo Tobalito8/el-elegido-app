@@ -55,6 +55,13 @@ body {
 .title-font {
   font-family: "Cinzel Decorative", serif;
 }
+.mission-panel {
+  background: rgba(30, 18, 5, 0.85);
+  backdrop-filter: blur(8px);
+}
+.mission-tab-glow {
+  box-shadow: 0 0 20px rgba(217, 119, 6, 0.15);
+}
 .ambient-bg {
   background:
     radial-gradient(

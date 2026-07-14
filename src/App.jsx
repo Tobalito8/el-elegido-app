@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { GS } from "./constants";
+import { GS, REWARDS, PENALTIES } from "./constants";
 import {
   firestoreDb,
   docRef,
@@ -10,6 +10,7 @@ import {
   onSnapshotCompat,
 } from "./lib/firebase";
 import { shareCode } from "./lib/shareCode";
+import { buildNewMission } from "./lib/mission";
 import {
   LockIcon,
   ExitIcon,
@@ -19,8 +20,6 @@ import {
   UserIcon,
   EyeIcon,
   GhostIcon,
-  MsgIcon,
-  SendIcon,
   CheckIcon,
   ShareIcon,
 } from "./icons";
@@ -30,6 +29,7 @@ import CofreMinijuego from "./screens/CofreMinijuego";
 import RoundMinigame from "./screens/RoundMinigame";
 import CofreTurno from "./screens/CofreTurno";
 import CofreFinal from "./screens/CofreFinal";
+import MissionPanel from "./components/MissionPanel";
 
 export default function App() {
   const [isFirebaseReady, setIsFirebaseReady] = useState(false);
@@ -40,12 +40,9 @@ export default function App() {
   const [roomData, setRoomData] = useState(null);
   const [myId, setMyId] = useState("");
   const [error, setError] = useState("");
-  const [ghostMessage, setGhostMessage] = useState("");
-  const [taskText, setTaskText] = useState("");
   const [isRevealingRole, setIsRevealingRole] = useState(false);
   const [newGameName, setNewGameName] = useState("");
   const [selectingSwapTarget, setSelectingSwapTarget] = useState(false);
-  const chatEndRef = useRef(null);
   const [reconnecting, setReconnecting] = useState(false);
   // How many consecutive snapshots in a row found us missing from the player list
   // before we actually treat it as "removed". Avoids false-positives from stale/cached
@@ -173,9 +170,10 @@ export default function App() {
       lastResult: "",
       lastVictim: null,
       victimWasChosen: false,
-      ghostMessages: [],
-      taskAssignerId: null,
-      currentTask: null,
+      mission: null,
+      missionExtraElim: false,
+      missionExtraElimTarget: null,
+      missionElegidoId: null,
       games: [],
       currentGame: null,
       roundWinner: null,
@@ -294,13 +292,15 @@ export default function App() {
     const chosenId = alive[Math.floor(Math.random() * alive.length)].id;
     const chosenHash = btoa(chosenId + roomCode);
     const game = pickRoundGame();
+    const mission = buildNewMission(roomData.players);
     await upd({
       status: GS.JUGANDO,
       chosenHash,
       votes: {},
-      ghostMessages: [],
-      taskAssignerId: null,
-      currentTask: null,
+      mission,
+      missionExtraElim: false,
+      missionExtraElimTarget: null,
+      missionElegidoId: null,
       currentGame: game,
       roundWinner: null,
       immunePlayerId: null,
@@ -317,37 +317,98 @@ export default function App() {
       [`votes.${myId}`]: targetId,
     });
   };
-  const sendGhostMessage = async () => {
-    if (!ghostMessage.trim()) return;
-    const msgs = [
-      ...(roomData.ghostMessages || []),
-      {
-        sender: playerName,
-        text: ghostMessage,
-        time: Date.now(),
-      },
-    ];
+  // ── Mission secreta actions ────────────────────────────────────────────────
+  const submitMission = async (text) => {
+    if (!text.trim()) return;
+    const alive = roomData.players.filter((p) => p.isAlive);
+    let rewardPool = [...REWARDS];
+    // Exclude extra_elim if <=4 alive (would leave only 2 after normal elim)
+    if (alive.length <= 4)
+      rewardPool = rewardPool.filter((r) => r.id !== "extra_elim");
+    const reward = rewardPool[Math.floor(Math.random() * rewardPool.length)];
+    const penalty = PENALTIES[Math.floor(Math.random() * PENALTIES.length)];
     await upd({
-      ghostMessages: msgs,
+      mission: { ...roomData.mission, text, reward, penalty, status: "active" },
     });
-    setGhostMessage("");
   };
-  const assignTask = async () => {
-    if (!taskText.trim()) return;
-    if (roomData.taskAssignerId !== myId || roomData.currentTask) return;
+  const validateMission = async (result) => {
     await upd({
-      currentTask: taskText.trim(),
+      mission: { ...roomData.mission, status: result },
     });
-    setTaskText("");
+  };
+  // Elegido picks extra elimination (reward: extra_elim)
+  const applyExtraElim = async (targetId) => {
+    const newPlayers = roomData.players.map((p) =>
+      p.id === targetId ? { ...p, isAlive: false } : p,
+    );
+    const targetName = roomData.players.find((p) => p.id === targetId)?.name || "?";
+    await upd({
+      players: newPlayers,
+      missionExtraElimTarget: targetId,
+      missionExtraElim: false,
+      lastResult: roomData.lastResult + ` Además, ${targetName} fue eliminado por el Elegido.`,
+    });
   };
   const finishVoting = async () => {
     const voteCounts = {};
     Object.values(roomData.votes || {}).forEach((id) => {
       voteCounts[id] = (voteCounts[id] || 0) + 1;
     });
+
+    const mission = roomData.mission;
+    const elegidoPlayer = roomData.players.find(
+      (p) => btoa(p.id + roomCode) === roomData.chosenHash,
+    );
+    const elegidoId = elegidoPlayer?.id;
+    const missionNotes = [];
+
+    // Apply pre-vote-count mission effects
+    if (
+      mission?.text &&
+      elegidoId &&
+      (mission.status === "success" || mission.status === "failure")
+    ) {
+      if (mission.status === "success") {
+        if (mission.reward.id === "double_vote") {
+          const ev = roomData.votes[elegidoId];
+          if (ev) {
+            voteCounts[ev] = (voteCounts[ev] || 0) + 1;
+            missionNotes.push("⚡ El voto del Elegido contó doble.");
+          }
+        } else if (mission.reward.id === "cancel_vote") {
+          if ((voteCounts[elegidoId] || 0) > 0) {
+            voteCounts[elegidoId]--;
+            missionNotes.push("🛡️ Un voto contra el Elegido fue anulado.");
+          }
+        }
+      } else {
+        if (mission.penalty.id === "two_votes_against") {
+          voteCounts[elegidoId] = (voteCounts[elegidoId] || 0) + 2;
+          missionNotes.push(
+            "🗡️ El Elegido recibió 2 votos extra en su contra.",
+          );
+        } else if (mission.penalty.id === "no_vote") {
+          const ev = roomData.votes[elegidoId];
+          if (ev && (voteCounts[ev] || 0) > 0) {
+            voteCounts[ev]--;
+            missionNotes.push("🚫 El voto del Elegido fue anulado.");
+          }
+        } else if (mission.penalty.id === "one_vote_reassign") {
+          voteCounts[elegidoId] = (voteCounts[elegidoId] || 0) + 1;
+          missionNotes.push(
+            "💢 El Elegido recibió 1 voto extra en su contra.",
+          );
+        }
+      }
+    }
+
     let maxV = 0,
       tiedIds = [];
     Object.entries(voteCounts).forEach(([id, c]) => {
+      // Votes reduced to 0 (or less) by a mission effect like cancel_vote/no_vote
+      // must not count as a "tie at 0" — otherwise the cancelled target still
+      // gets picked as victim, defeating the whole point of the reward.
+      if (c <= 0) return;
       if (c > maxV) {
         maxV = c;
         tiedIds = [id];
@@ -358,12 +419,31 @@ export default function App() {
       victimWasChosen = false;
     let nextHash = roomData.chosenHash,
       playersUpdate = roomData.players;
-    if (Object.keys(voteCounts).length === 0) {
+    let missionExtraElim = false,
+      missionElegidoId = null;
+    if (tiedIds.length === 0) {
       message = "Nadie votó a tiempo.";
     } else if (tiedIds.length > 1) {
-      message = "¡EMPATE! Las votaciones se anularon. Nadie eliminado.";
+      // Tiebreak reward
+      if (
+        mission?.status === "success" &&
+        mission.reward.id === "tiebreak" &&
+        elegidoId
+      ) {
+        const ev = roomData.votes[elegidoId];
+        if (ev && tiedIds.includes(ev)) {
+          victimId = ev;
+          missionNotes.push("⚖️ ¡El desempate del Elegido rompió el empate!");
+        } else {
+          message = "¡EMPATE! Las votaciones se anularon. Nadie eliminado.";
+        }
+      } else {
+        message = "¡EMPATE! Las votaciones se anularon. Nadie eliminado.";
+      }
     } else {
       victimId = tiedIds[0];
+    }
+    if (victimId) {
       playersUpdate = roomData.players.map((p) =>
         p.id === victimId
           ? {
@@ -373,8 +453,9 @@ export default function App() {
           : p,
       );
       victimWasChosen = btoa(victimId + roomCode) === roomData.chosenHash;
+      const victimName = roomData.players.find((p) => p.id === victimId)?.name;
       if (victimWasChosen) {
-        message = `¡LO DESCUBRIERON! era ${roomData.players.find((p) => p.id === victimId).name}. Se ha asignado un nuevo Elegido.`;
+        message = `¡LO DESCUBRIERON! era ${victimName}. Se ha asignado un nuevo Elegido.`;
         const survivors = playersUpdate.filter((p) => p.isAlive);
         if (survivors.length > 0) {
           const newChosen =
@@ -382,16 +463,81 @@ export default function App() {
           nextHash = btoa(newChosen + roomCode);
         }
       } else {
-        message = `EQUIVOCACIÓN. ${roomData.players.find((p) => p.id === victimId)?.name} fue eliminado pero NO era.`;
+        message = `EQUIVOCACIÓN. ${victimName} fue eliminado pero NO era.`;
       }
     }
+
+    // Post-victim mission effects
+    if (mission?.text && elegidoId) {
+      if (mission.status === "success") {
+        if (mission.reward.id === "reassign_chosen") {
+          const survivors = playersUpdate.filter((p) => p.isAlive);
+          if (survivors.length > 0) {
+            const nc =
+              survivors[Math.floor(Math.random() * survivors.length)].id;
+            nextHash = btoa(nc + roomCode);
+            missionNotes.push("🎲 El Elegido fue reasignado aleatoriamente.");
+          }
+        } else if (mission.reward.id === "extra_elim") {
+          if (playersUpdate.find((p) => p.id === elegidoId)?.isAlive) {
+            missionExtraElim = true;
+            missionElegidoId = elegidoId;
+            missionNotes.push("💀 El Elegido puede eliminar a alguien más.");
+          }
+        }
+      } else if (mission.status === "failure") {
+        if (mission.penalty.id === "swap_dead") {
+          // Elegido eliminated, random dead revives
+          const deadOthers = roomData.players.filter(
+            (p) => !p.isAlive && p.id !== elegidoId,
+          );
+          playersUpdate = playersUpdate.map((p) =>
+            p.id === elegidoId ? { ...p, isAlive: false } : p,
+          );
+          if (deadOthers.length > 0) {
+            const revived =
+              deadOthers[Math.floor(Math.random() * deadOthers.length)];
+            playersUpdate = playersUpdate.map((p) =>
+              p.id === revived.id ? { ...p, isAlive: true } : p,
+            );
+            missionNotes.push(
+              `☠️ El Elegido fue eliminado y ${revived.name} revivió.`,
+            );
+          } else {
+            missionNotes.push(
+              "☠️ El Elegido fue eliminado (no hay muertos que revivir).",
+            );
+          }
+          const survivors = playersUpdate.filter((p) => p.isAlive);
+          if (survivors.length > 0) {
+            const nc =
+              survivors[Math.floor(Math.random() * survivors.length)].id;
+            nextHash = btoa(nc + roomCode);
+          }
+        } else if (mission.penalty.id === "one_vote_reassign") {
+          const survivors = playersUpdate.filter((p) => p.isAlive);
+          if (survivors.length > 0) {
+            const nc =
+              survivors[Math.floor(Math.random() * survivors.length)].id;
+            nextHash = btoa(nc + roomCode);
+            missionNotes.push("🎲 El Elegido fue reasignado por penalización.");
+          }
+        }
+      }
+    }
+
+    const finalMessage = [message, ...missionNotes].filter(Boolean).join(" ");
+
     await upd({
       status: GS.RESULTADOS,
-      lastResult: message,
+      lastResult: finalMessage,
       players: playersUpdate,
       chosenHash: nextHash,
       lastVictim: victimId,
       victimWasChosen,
+      missionExtraElim,
+      missionExtraElimTarget: null,
+      missionElegidoId,
     });
   };
   const handleNextRound = async () => {
@@ -417,6 +563,10 @@ export default function App() {
         votes: {},
         immunePlayerId: null,
         cofreMinijuego: null,
+        mission: null,
+        missionExtraElim: false,
+        missionExtraElimTarget: null,
+        missionElegidoId: null,
       });
       return;
     }
@@ -427,22 +577,22 @@ export default function App() {
           ...p,
           isAlive: true,
         })),
-        taskAssignerId: null,
-        currentTask: null,
+        mission: null,
+        missionExtraElim: false,
+        missionExtraElimTarget: null,
+        missionElegidoId: null,
       });
     } else {
       const game = pickRoundGame();
-      const ghosts = roomData.players.filter((p) => !p.isAlive);
-      const taskAssignerId = ghosts.length
-        ? ghosts[Math.floor(Math.random() * ghosts.length)].id
-        : null;
+      const mission = buildNewMission(roomData.players);
       await upd({
         status: GS.JUGANDO,
         currentGame: game,
         votes: {},
-        ghostMessages: [],
-        taskAssignerId,
-        currentTask: null,
+        mission,
+        missionExtraElim: false,
+        missionExtraElimTarget: null,
+        missionElegidoId: null,
         immunePlayerId: null,
         lastVictim: null,
         roundMinigame: null,
@@ -673,6 +823,9 @@ export default function App() {
   const currentTurnPlayerId =
     roomData?.chestTurnOrder?.[roomData?.chestCurrentTurnIndex];
   const isMyChestTurn = currentTurnPlayerId === myId;
+  const waitingExtraElim =
+    roomData?.missionExtraElim === true &&
+    roomData?.missionExtraElimTarget == null;
   return (
     <div className="app-container ambient-bg">
       <div
@@ -1024,91 +1177,17 @@ export default function App() {
                     ESTÁS MUERTO
                   </h2>
                   <p className="text-slate-400 italic">
-                    Usa el chat de fantasmas.
+                    Quizá te toque asignar la Misión Secreta.
                   </p>
                 </div>
               )}
-              {(!amIAlive || (amIAlive && amIChosen)) &&
-                roomData.taskAssignerId && (
-                  <div className="bg-slate-900 border-2 border-amber-700/50 rounded-2xl p-4 w-full space-y-2">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500 flex items-center gap-2">
-                      🎯 Tarea de la ronda
-                    </p>
-                    {roomData.currentTask ? (
-                      <p className="text-amber-100 text-sm italic">
-                        "{roomData.currentTask}"
-                      </p>
-                    ) : myId === roomData.taskAssignerId ? (
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          placeholder="Asígnale una tarea al Elegido..."
-                          className="flex-1 bg-slate-800 px-3 py-2 rounded-xl text-sm outline-none text-white"
-                          value={taskText}
-                          onChange={(e) => setTaskText(e.target.value)}
-                          onKeyPress={(e) =>
-                            e.key === "Enter" && assignTask()
-                          }
-                        />
-                        <button
-                          onClick={assignTask}
-                          className="bg-amber-700 hover:bg-amber-600 px-4 py-2 rounded-xl text-sm font-bold transition-colors"
-                        >
-                          Asignar
-                        </button>
-                      </div>
-                    ) : (
-                      <p className="text-slate-500 text-xs italic animate-pulse">
-                        Un fantasma está eligiendo una tarea para el
-                        Elegido...
-                      </p>
-                    )}
-                  </div>
-                )}
-              {(!amIAlive || (amIAlive && amIChosen)) && (
-                <div className="bg-slate-900 border-2 border-slate-700 rounded-2xl flex flex-col h-[280px] w-full">
-                  <div className="bg-slate-800 p-3 text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2 border-b border-slate-700">
-                    <MsgIcon c="w-4 h-4" />
-                    {amIChosen
-                      ? "Mensajes del más allá (Solo tú los ves)"
-                      : "Chat de Fantasmas"}
-                  </div>
-                  <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                    {roomData.ghostMessages?.map((m, i) => (
-                      <div
-                        key={i}
-                        className="ghost-msg bg-slate-800/80 p-3 rounded-xl text-sm"
-                      >
-                        <span className="text-red-400 font-bold">
-                          {m.sender}:{" "}
-                        </span>
-                        <span className="text-slate-200">{m.text}</span>
-                      </div>
-                    ))}
-                    <div ref={chatEndRef} />
-                  </div>
-                  {!amIAlive && (
-                    <div className="p-2 border-t border-slate-700 flex gap-2">
-                      <input
-                        type="text"
-                        placeholder="Mensaje..."
-                        className="flex-1 bg-slate-800 px-4 py-2 rounded-xl text-sm outline-none text-white"
-                        value={ghostMessage}
-                        onChange={(e) => setGhostMessage(e.target.value)}
-                        onKeyPress={(e) =>
-                          e.key === "Enter" && sendGhostMessage()
-                        }
-                      />
-                      <button
-                        onClick={sendGhostMessage}
-                        className="bg-amber-700 px-4 py-2 rounded-xl"
-                      >
-                        <SendIcon c="w-4 h-4 text-white" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
+              <MissionPanel
+                roomData={roomData}
+                myId={myId}
+                amIChosen={amIChosen}
+                onSubmitMission={submitMission}
+                onValidateMission={validateMission}
+              />
               {isHost && (
                 <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40 space-y-2">
                   {roomData.currentGame?.appGame && !roomData.roundMinigame && (
@@ -1140,6 +1219,24 @@ export default function App() {
                 ¿A quién vas a expulsar?
               </p>
             </div>
+            {roomData.mission?.text && (
+              <div
+                className={`p-3 rounded-xl border text-sm text-center ${roomData.mission.status === "success" ? "bg-emerald-900/20 border-emerald-700/40 text-emerald-300" : roomData.mission.status === "failure" ? "bg-red-900/20 border-red-700/40 text-red-300" : "bg-slate-800/60 border-slate-700 text-slate-400"}`}
+              >
+                📜 Misión:{" "}
+                {roomData.mission.status === "success"
+                  ? "Completada ✅"
+                  : roomData.mission.status === "failure"
+                    ? "Fallida ❌"
+                    : "Pendiente de validar ⚠️"}
+                {roomData.mission.status === "active" && (
+                  <span className="block text-xs italic mt-1 text-slate-500">
+                    Se aplicará sin efectos si no se valida antes de contar
+                    votos
+                  </span>
+                )}
+              </div>
+            )}
             <div className="grid gap-3 pb-20">
               {roomData.players
                 .filter((p) => p.isAlive && p.id !== roomData.immunePlayerId)
@@ -1190,7 +1287,59 @@ export default function App() {
                 {roomData.lastResult}
               </h2>
             </div>
-            {alive.length === 3 && (
+            {roomData.mission?.text &&
+              (roomData.mission.status === "success" ||
+                roomData.mission.status === "failure") && (
+                <div
+                  className={`p-3 rounded-2xl border flex items-center gap-3 fade-in ${roomData.mission.status === "success" ? "border-emerald-700/40 bg-emerald-900/15" : "border-red-700/40 bg-red-900/15"}`}
+                >
+                  <span className="text-2xl">
+                    {roomData.mission.status === "success" ? "✅" : "❌"}
+                  </span>
+                  <p
+                    className={`font-black text-sm title-font ${roomData.mission.status === "success" ? "text-emerald-300" : "text-red-300"}`}
+                  >
+                    La misión fue{" "}
+                    {roomData.mission.status === "success"
+                      ? "completada"
+                      : "fallida"}
+                  </p>
+                </div>
+              )}
+            {roomData.missionExtraElim && !roomData.missionExtraElimTarget && (
+              <div
+                className={`p-4 rounded-2xl border-2 border-red-600/60 bg-red-900/20 fade-in ${myId === roomData.missionElegidoId ? "" : "opacity-60"}`}
+              >
+                <p className="font-black text-red-300 text-sm title-font mb-1">
+                  💀 ELIMINACIÓN EXTRA
+                </p>
+                {myId === roomData.missionElegidoId ? (
+                  <>
+                    <p className="text-slate-300 text-xs italic mb-3">
+                      Como recompensa, puedes eliminar a otro jugador. Elige:
+                    </p>
+                    <div className="space-y-2">
+                      {roomData.players
+                        .filter((p) => p.isAlive && p.id !== myId)
+                        .map((p) => (
+                          <button
+                            key={p.id}
+                            onClick={() => applyExtraElim(p.id)}
+                            className="w-full p-3 rounded-xl border border-red-700/50 bg-red-900/30 text-red-200 font-bold text-sm active:scale-95 hover:bg-red-900/50 transition-colors"
+                          >
+                            ☠️ Eliminar a {p.name}
+                          </button>
+                        ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-slate-400 text-xs italic animate-pulse">
+                    El Elegido está eligiendo a quién eliminar...
+                  </p>
+                )}
+              </div>
+            )}
+            {alive.length === 3 && !roomData.missionExtraElim && (
               <div className="bg-amber-900/20 border border-amber-700/50 p-4 rounded-2xl">
                 <p className="text-amber-300 font-black text-lg title-font">
                   ⚠ RONDA FINAL
@@ -1214,9 +1363,10 @@ export default function App() {
               <div className="fixed bottom-6 left-0 right-0 px-4 max-w-[500px] mx-auto z-40">
                 <button
                   onClick={handleNextRound}
-                  className="w-full bg-amber-700 hover:bg-amber-600 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 title-font transition-colors"
+                  disabled={waitingExtraElim}
+                  className="w-full bg-amber-700 hover:bg-amber-600 p-5 rounded-2xl font-black text-xl shadow-2xl active:scale-95 disabled:opacity-40 title-font transition-colors"
                 >
-                  CONTINUAR
+                  {waitingExtraElim ? "Esperando eliminación extra..." : "CONTINUAR"}
                 </button>
               </div>
             ) : (
